@@ -1,0 +1,1926 @@
+"""Direct Transformers evaluation for custom VQA, description, grounding and grounded-description data."""
+
+from __future__ import annotations
+
+import ast
+import csv
+import json
+import math
+import os
+import re
+import string
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+MEDIA_TOKEN_RE = re.compile(r'<(image|video)>', re.IGNORECASE)
+NUMBER_RE = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
+LEGACY_BOX_RE = re.compile(r'<\|box_start\|>(.*?)<\|box_end\|>', re.DOTALL)
+TAGGED_BOX_RE = re.compile(r'<(?:bbox|box)>(.*?)</(?:bbox|box)>', re.DOTALL | re.IGNORECASE)
+INLINE_BOX_RE = re.compile(rf'[\[(]\s*{NUMBER_RE}\s*,\s*{NUMBER_RE}\s*,\s*{NUMBER_RE}\s*,\s*{NUMBER_RE}\s*[\])]')
+PAIR_BOX_RE = re.compile(rf'\(\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*\)\s*,?\s*'
+                         rf'\(\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*\)')
+KEYED_BOX_RE = re.compile(
+    rf'(?:bbox_2d|bounding_box|bbox|box)\s*["\']?\s*[:=]\s*'
+    rf'[\[(]\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*,\s*'
+    rf'({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*[\])]', re.IGNORECASE)
+PLAIN_BOX_RE = re.compile(rf'^\s*[\[(]\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*,\s*'
+                          rf'({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*[\])]\s*$')
+ANSWER_RE = re.compile(r'<answer>(.*?)</answer>', re.DOTALL | re.IGNORECASE)
+THINK_END_RE = re.compile(r'</think>', re.IGNORECASE)
+DESCRIPTION_TOKEN_RE = re.compile(
+    r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[\u3040-\u30ff]|[^\W_]+(?:[\'’.-][^\W_]+)*',
+    re.UNICODE)
+DESCRIPTION_PROMPT_RE = re.compile(r'\b(?:describe|description|caption)\b', re.IGNORECASE)
+OBJECT_REF_MARKUP_RE = re.compile(
+    r'<\|(?:object_ref_start|object_ref_end)\|>|</?(?:ref-object|object-ref|ref|object)>', re.IGNORECASE)
+GROUNDING_PROMPT_RE = re.compile(
+    r'\b(?:locate|localize|localise|localization|localisation|bounding[ _-]?box|bbox|coordinates?)\b',
+    re.IGNORECASE)
+BOX_KEYS = ('bbox_2d', 'bounding_box', 'bbox', 'box')
+PREDICTION_COLUMNS = ('model', 'dataset', 'sample_id', 'line_number', 'task', 'question', 'reference', 'prediction',
+                      'error', 'exact_match', 'vqa_accuracy', 'token_f1', 'rouge_l', 'bleu_4', 'chrf', 'pred_boxes',
+                      'gt_boxes', 'mean_iou', 'iou_accuracy', 'parse_success')
+
+NUMBER_WORDS = {
+    'zero': '0',
+    'one': '1',
+    'two': '2',
+    'three': '3',
+    'four': '4',
+    'five': '5',
+    'six': '6',
+    'seven': '7',
+    'eight': '8',
+    'nine': '9',
+    'ten': '10',
+}
+ARTICLES = {'a', 'an', 'the'}
+VIDEO_BACKENDS = {'auto', 'decord', 'opencv', 'pyav', 'torchvision', 'torchcodec'}
+
+
+@dataclass
+class EvalConfig:
+    val_dataset: Path
+    model_weights: Path
+    output_dir: Path
+    model_name: str
+    dataset_name: str
+    model_type: Optional[str] = None
+    task: str = 'auto'
+    base_model: Optional[Path] = None
+    batch_size: int = 1
+    max_new_tokens: int = 128
+    limit: Optional[int] = None
+    dtype: str = 'auto'
+    device: str = 'auto'
+    attn_implementation: str = 'sdpa'
+    max_image_pixels: Optional[int] = None
+    min_video_frames: Optional[int] = None
+    max_video_frames: Optional[int] = None
+    video_backend: str = 'auto'
+    allow_empty_video_fallback: bool = False
+    group_image_batches: bool = False
+    group_video_batches: bool = False
+    min_video_batch_size: int = 1
+    iou_threshold: float = 0.5
+    prediction_space: str = 'norm1000'
+    trust_remote_code: bool = False
+    progress_every: int = 10
+    continue_on_error: bool = False
+    resume: bool = False
+    retry_errors: bool = False
+    overwrite: bool = False
+
+
+@dataclass
+class PreparedSample:
+    line_number: int
+    sample_id: str
+    task: str
+    question: str
+    references: List[str]
+    messages: List[Dict[str, Any]]
+    record: Dict[str, Any]
+
+
+class ScoreAccumulator:
+
+    def __init__(self, iou_threshold: float) -> None:
+        self.iou_threshold = iou_threshold
+        self.vqa_samples = 0
+        self.exact_sum = 0.0
+        self.vqa_sum = 0.0
+        self.vqa_token_f1_sum = 0.0
+        self.description_samples = 0
+        self.description_token_f1_sum = 0.0
+        self.rouge_l_sum = 0.0
+        self.bleu_4_sum = 0.0
+        self.chrf_sum = 0.0
+        self.grounding_samples = 0
+        self.grounding_parse_success = 0
+        self.gt_boxes = 0
+        self.pred_boxes = 0
+        self.matched_boxes = 0
+        self.iou_sum = 0.0
+        self.iou_hits = 0
+        self.complete_samples = 0
+        self.vqa_failed_samples = 0
+        self.description_failed_samples = 0
+        self.grounding_failed_samples = 0
+        self.grounded_samples = 0
+        self.grounded_description_token_f1_sum = 0.0
+        self.grounded_rouge_l_sum = 0.0
+        self.grounded_bleu_4_sum = 0.0
+        self.grounded_chrf_sum = 0.0
+        self.grounded_parse_success = 0
+        self.grounded_gt_boxes = 0
+        self.grounded_pred_boxes = 0
+        self.grounded_matched_boxes = 0
+        self.grounded_iou_sum = 0.0
+        self.grounded_iou_hits = 0
+        self.grounded_complete_samples = 0
+        self.grounded_failed_samples = 0
+
+    def add_vqa(self, scores: Mapping[str, float], failed: bool = False) -> None:
+        self.vqa_samples += 1
+        self.exact_sum += scores['exact_match']
+        self.vqa_sum += scores['vqa_accuracy']
+        self.vqa_token_f1_sum += scores['token_f1']
+        self.vqa_failed_samples += int(failed)
+
+    def add_description(self, scores: Mapping[str, float], failed: bool = False) -> None:
+        self.description_samples += 1
+        self.description_token_f1_sum += scores['token_f1']
+        self.rouge_l_sum += scores['rouge_l']
+        self.bleu_4_sum += scores['bleu_4']
+        self.chrf_sum += scores['chrf']
+        self.description_failed_samples += int(failed)
+
+    def add_grounding(self, scores: Mapping[str, Any], failed: bool = False) -> None:
+        self.grounding_samples += 1
+        self.grounding_parse_success += int(scores['parse_success'])
+        self.gt_boxes += int(scores['gt_box_count'])
+        self.pred_boxes += int(scores['pred_box_count'])
+        self.matched_boxes += int(scores['matched_box_count'])
+        self.iou_sum += float(scores['iou_sum'])
+        self.iou_hits += int(scores['iou_hits'])
+        self.complete_samples += int(scores['complete'])
+        self.grounding_failed_samples += int(failed)
+
+    def add_grounded(self, description: Mapping[str, float], grounding: Mapping[str, Any],
+                     failed: bool = False) -> None:
+        self.grounded_samples += 1
+        self.grounded_description_token_f1_sum += description['token_f1']
+        self.grounded_rouge_l_sum += description['rouge_l']
+        self.grounded_bleu_4_sum += description['bleu_4']
+        self.grounded_chrf_sum += description['chrf']
+        self.grounded_parse_success += int(grounding['parse_success'])
+        self.grounded_gt_boxes += int(grounding['gt_box_count'])
+        self.grounded_pred_boxes += int(grounding['pred_box_count'])
+        self.grounded_matched_boxes += int(grounding['matched_box_count'])
+        self.grounded_iou_sum += float(grounding['iou_sum'])
+        self.grounded_iou_hits += int(grounding['iou_hits'])
+        self.grounded_complete_samples += int(grounding['complete'])
+        self.grounded_failed_samples += int(failed)
+
+    def summary_rows(self, model: str, dataset: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        if self.vqa_samples:
+            rows.append({
+                'model': model,
+                'dataset': dataset,
+                'task': 'vqa',
+                'num_samples': self.vqa_samples,
+                'exact_match': self.exact_sum / self.vqa_samples,
+                'vqa_accuracy': self.vqa_sum / self.vqa_samples,
+                'token_f1': self.vqa_token_f1_sum / self.vqa_samples,
+                'rouge_l': '',
+                'bleu_4': '',
+                'chrf': '',
+                'mean_iou': '',
+                'iou_accuracy': '',
+                'grounding_precision': '',
+                'grounding_f1': '',
+                'sample_accuracy': '',
+                'parse_success_rate': '',
+                'failed_samples': self.vqa_failed_samples,
+            })
+        if self.description_samples:
+            rows.append({
+                'model': model,
+                'dataset': dataset,
+                'task': 'description',
+                'num_samples': self.description_samples,
+                'exact_match': '',
+                'vqa_accuracy': '',
+                'token_f1': self.description_token_f1_sum / self.description_samples,
+                'rouge_l': self.rouge_l_sum / self.description_samples,
+                'bleu_4': self.bleu_4_sum / self.description_samples,
+                'chrf': self.chrf_sum / self.description_samples,
+                'mean_iou': '',
+                'iou_accuracy': '',
+                'grounding_precision': '',
+                'grounding_f1': '',
+                'sample_accuracy': '',
+                'parse_success_rate': '',
+                'failed_samples': self.description_failed_samples,
+            })
+        if self.grounding_samples:
+            precision = _safe_div(self.iou_hits, self.pred_boxes)
+            recall = _safe_div(self.iou_hits, self.gt_boxes)
+            rows.append({
+                'model': model,
+                'dataset': dataset,
+                'task': 'grounding',
+                'num_samples': self.grounding_samples,
+                'exact_match': '',
+                'vqa_accuracy': '',
+                'token_f1': '',
+                'rouge_l': '',
+                'bleu_4': '',
+                'chrf': '',
+                'mean_iou': _safe_div(self.iou_sum, self.gt_boxes),
+                'iou_accuracy': recall,
+                'grounding_precision': precision,
+                'grounding_f1': _safe_div(2 * precision * recall, precision + recall),
+                'sample_accuracy': _safe_div(self.complete_samples, self.grounding_samples),
+                'parse_success_rate': _safe_div(self.grounding_parse_success, self.grounding_samples),
+                'failed_samples': self.grounding_failed_samples,
+            })
+        if self.grounded_samples:
+            precision = _safe_div(self.grounded_iou_hits, self.grounded_pred_boxes)
+            recall = _safe_div(self.grounded_iou_hits, self.grounded_gt_boxes)
+            rows.append({
+                'model': model,
+                'dataset': dataset,
+                'task': 'grounded',
+                'num_samples': self.grounded_samples,
+                'exact_match': '',
+                'vqa_accuracy': '',
+                'token_f1': self.grounded_description_token_f1_sum / self.grounded_samples,
+                'rouge_l': self.grounded_rouge_l_sum / self.grounded_samples,
+                'bleu_4': self.grounded_bleu_4_sum / self.grounded_samples,
+                'chrf': self.grounded_chrf_sum / self.grounded_samples,
+                'mean_iou': _safe_div(self.grounded_iou_sum, self.grounded_gt_boxes),
+                'iou_accuracy': recall,
+                'grounding_precision': precision,
+                'grounding_f1': _safe_div(2 * precision * recall, precision + recall),
+                'sample_accuracy': _safe_div(self.grounded_complete_samples, self.grounded_samples),
+                'parse_success_rate': _safe_div(self.grounded_parse_success, self.grounded_samples),
+                'failed_samples': self.grounded_failed_samples,
+            })
+        return rows
+
+
+def normalize_vqa_answer(value: Any) -> str:
+    """Normalize an answer without depending on an external benchmark package."""
+    text = final_answer_text(str(value)).casefold().strip()
+    text = text.replace('\n', ' ').replace('\t', ' ')
+    punctuation = string.punctuation.replace('.', '').replace(',', '')
+    text = text.translate(str.maketrans({character: ' ' for character in punctuation}))
+    text = re.sub(r'(?<!\d)[.,]|[.,](?!\d)', ' ', text)
+    words = [NUMBER_WORDS.get(word, word) for word in text.split() if word not in ARTICLES]
+    return ' '.join(words)
+
+
+def vqa_scores(prediction: str, references: Sequence[str]) -> Dict[str, float]:
+    references = [str(value) for value in references if value is not None]
+    if not references:
+        raise ValueError('VQA sample has no reference answer.')
+    prediction = final_answer_text(prediction)
+    normalized_prediction = normalize_vqa_answer(prediction)
+    normalized_references = [normalize_vqa_answer(value) for value in references]
+    matches = sum(normalized_prediction == value for value in normalized_references)
+    soft_accuracy = float(matches > 0) if len(references) == 1 else min(1.0, matches / 3.0)
+    return {
+        'exact_match': float(any(prediction.strip() == value.strip() for value in references)),
+        'vqa_accuracy': soft_accuracy,
+        'token_f1': max((_token_f1(normalized_prediction, value) for value in normalized_references), default=0.0),
+    }
+
+
+def description_scores(prediction: str, references: Sequence[str]) -> Dict[str, float]:
+    """Score a free-form description with dependency-free, multi-reference metrics."""
+    references = [final_answer_text(str(value)) for value in references if value is not None]
+    if not references:
+        raise ValueError('Description sample has no reference answer.')
+    prediction = final_answer_text(prediction)
+    prediction_tokens = _description_tokens(prediction)
+    reference_tokens = [_description_tokens(value) for value in references]
+    return {
+        'token_f1': max((_token_f1_tokens(prediction_tokens, value) for value in reference_tokens), default=0.0),
+        'rouge_l': max((_rouge_l_f1(prediction_tokens, value) for value in reference_tokens), default=0.0),
+        'bleu_4': _sentence_bleu(prediction_tokens, reference_tokens, max_order=4),
+        'chrf': max((_chrf(prediction, value) for value in references), default=0.0),
+    }
+
+
+def grounded_description_text(value: Any) -> str:
+    """Return only the natural-language part of a phrase-and-box answer."""
+    text = final_answer_text(str(value or ''))
+    for candidate in _structured_candidates(text):
+        if not isinstance(candidate, Mapping):
+            continue
+        parts = []
+        for key in ('description', 'caption', 'label', 'ref', 'text', 'name', 'object'):
+            item = candidate.get(key)
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, list):
+                parts.extend(str(element).strip() for element in item
+                             if isinstance(element, str) and element.strip())
+        if parts:
+            return ' '.join(parts)
+    text = LEGACY_BOX_RE.sub(' ', text)
+    text = TAGGED_BOX_RE.sub(' ', text)
+    text = KEYED_BOX_RE.sub(' ', text)
+    text = PAIR_BOX_RE.sub(' ', text)
+    text = INLINE_BOX_RE.sub(' ', text)
+    text = re.sub(r'</?(?:bbox|box)>', ' ', text, flags=re.IGNORECASE)
+    text = OBJECT_REF_MARKUP_RE.sub(' ', text)
+    return re.sub(r'\s+', ' ', text).strip(' \t\r\n,;:|-{}[]()"\'')
+
+
+def grounded_description_scores(prediction: str, references: Sequence[str]) -> Dict[str, float]:
+    """Score the phrase portion of an answer that also contains bounding boxes."""
+    return description_scores(
+        grounded_description_text(prediction),
+        [grounded_description_text(reference) for reference in references],
+    )
+
+
+def final_answer_text(text: str) -> str:
+    answers = ANSWER_RE.findall(text)
+    if answers:
+        return answers[-1].strip()
+    matches = list(THINK_END_RE.finditer(text))
+    if matches:
+        return text[matches[-1].end():].strip()
+    return text.strip()
+
+
+def parse_prediction_boxes(value: Any) -> List[Tuple[float, float, float, float]]:
+    if isinstance(value, (dict, list, tuple)):
+        return _deduplicate_boxes(_boxes_from_structured(value))
+    text = final_answer_text(str(value or ''))
+    boxes: List[Tuple[float, float, float, float]] = []
+    legacy = LEGACY_BOX_RE.findall(text)
+    for segment in legacy:
+        boxes.extend(_boxes_from_text_segment(segment))
+    if not boxes:
+        for candidate in _structured_candidates(text):
+            boxes.extend(_boxes_from_structured(candidate))
+    if not boxes:
+        for segment in TAGGED_BOX_RE.findall(text):
+            boxes.extend(_boxes_from_text_segment(segment))
+    if not boxes:
+        boxes.extend(tuple(float(value) for value in match.groups()) for match in KEYED_BOX_RE.finditer(text))
+    if not boxes:
+        boxes.extend(tuple(float(value) for value in match.groups()) for match in PAIR_BOX_RE.finditer(text))
+    if not boxes:
+        match = PLAIN_BOX_RE.fullmatch(text)
+        if match:
+            boxes.append(tuple(float(value) for value in match.groups()))
+    return _deduplicate_boxes(boxes)
+
+
+def grounding_scores(record: Mapping[str, Any], prediction: str, prediction_space: str, iou_threshold: float,
+                     dataset_dir: Path) -> Dict[str, Any]:
+    objects = record.get('objects')
+    if isinstance(objects, Mapping) and isinstance(objects.get('bbox'), list) and objects['bbox']:
+        gt_boxes = [_coerce_box(value) for value in objects['bbox']]
+        image_ids = objects.get('image_id') if isinstance(objects.get('image_id'), list) else []
+        image_ids = [int(value) for value in image_ids] + [0] * (len(gt_boxes) - len(image_ids))
+        gt_space = str(objects.get('bbox_type') or 'real').lower()
+    else:
+        gt_boxes = _deduplicate_boxes([
+            box
+            for reference in _reference_answers(record)
+            for box in parse_prediction_boxes(reference)
+        ])
+        if not gt_boxes:
+            raise ValueError('Grounding sample must contain objects.bbox or a parseable reference box.')
+        image_ids = [0] * len(gt_boxes)
+        gt_space = 'norm1000'
+    pred_boxes = parse_prediction_boxes(prediction)
+    images = _image_values(record)
+    normalized_gt = [
+        _normalize_box(
+            box, gt_space,
+            _image_size(images[image_ids[index]], dataset_dir)
+            if gt_space in {'real', 'absolute', 'pixel', 'pixels'} else None) for index, box in enumerate(gt_boxes)
+    ]
+    normalized_pred = [
+        _normalize_box(box, prediction_space,
+                       _image_size(images[0], dataset_dir) if prediction_space == 'real' else None)
+        for box in pred_boxes
+    ]
+    matches = _match_boxes(normalized_pred, normalized_gt)
+    best_ious = [0.0] * len(normalized_gt)
+    for _, gt_index, iou in matches:
+        best_ious[gt_index] = iou
+    hits = sum(iou >= iou_threshold for _, _, iou in matches)
+    return {
+        'pred_boxes': pred_boxes,
+        'gt_boxes': gt_boxes,
+        'best_ious': best_ious,
+        'mean_iou': _safe_div(sum(best_ious), len(best_ious)),
+        'iou_accuracy': _safe_div(hits, len(normalized_gt)),
+        'parse_success': bool(pred_boxes),
+        'gt_box_count': len(normalized_gt),
+        'pred_box_count': len(normalized_pred),
+        'matched_box_count': len(matches),
+        'iou_sum': sum(best_ious),
+        'iou_hits': hits,
+        'complete': hits == len(normalized_gt) and len(normalized_pred) == len(normalized_gt),
+    }
+
+
+def prepare_sample(record: Dict[str, Any], line_number: int, config: EvalConfig) -> PreparedSample:
+    task = _detect_task(record, config.task)
+    references = _reference_answers(record)
+    messages = record.get('messages')
+    if isinstance(messages, list):
+        messages = _messages_before_reference(messages)
+    else:
+        question = record.get('question', record.get('prompt', record.get('query')))
+        if question is None:
+            raise ValueError('Sample needs messages or a question/prompt/query field.')
+        messages = [{'role': 'user', 'content': str(question)}]
+    messages = _prepare_messages(messages, record, config.val_dataset.parent)
+    question = _last_user_text(messages)
+    sample_id = _sample_id(record, line_number)
+    return PreparedSample(line_number, sample_id, task, question, references, messages, record)
+
+
+def run_custom_eval(config: EvalConfig) -> List[Dict[str, Any]]:
+    _validate_config(config)
+    paths = {
+        'predictions': config.output_dir / 'predictions.jsonl',
+        'results': config.output_dir / 'results.csv',
+        'scores_csv': config.output_dir / 'scores.csv',
+        'scores_json': config.output_dir / 'scores.json',
+    }
+    if config.resume and config.overwrite:
+        raise ValueError('--resume and --overwrite cannot be used together.')
+    if not config.resume:
+        _guard_outputs(paths.values(), config.overwrite)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    model, processor, input_device = _load_model(config)
+    accumulator = ScoreAccumulator(config.iou_threshold)
+    completed_line_numbers: set[int] = set()
+    if config.resume:
+        completed_line_numbers = _restore_accumulator(paths, accumulator, config)
+    processed = len(completed_line_numbers)
+    append = bool(completed_line_numbers)
+    try:
+        with paths['predictions'].open('a' if append else 'w', encoding='utf-8', newline='\n') as prediction_stream, \
+                paths['results'].open('a' if append else 'w', encoding='utf-8', newline='') as result_stream:
+            result_writer = csv.DictWriter(result_stream, fieldnames=PREDICTION_COLUMNS)
+            if not append:
+                result_writer.writeheader()
+            batches: Dict[Any, List[PreparedSample]] = {}
+            pending_samples = 0
+            for line_number, record in _iter_records(config.val_dataset):
+                if line_number in completed_line_numbers:
+                    continue
+                if config.limit is not None and processed + pending_samples >= config.limit:
+                    break
+                sample = prepare_sample(record, line_number, config)
+                batch_key = _sample_batch_key(sample, processor, config)
+                batch = batches.setdefault(batch_key, [])
+                batch.append(sample)
+                pending_samples += 1
+                if len(batch) < config.batch_size:
+                    continue
+                _trace_batch(batch_key, batch)
+                previous_processed = processed
+                processed += _process_batch(batch, model, processor, input_device, config, accumulator,
+                                            prediction_stream, result_writer,
+                                            generation_batch_minimum=_generation_batch_minimum(batch_key, config))
+                pending_samples -= len(batch)
+                prediction_stream.flush()
+                result_stream.flush()
+                del batches[batch_key]
+                _report_progress(processed, config.progress_every, previous_processed=previous_processed)
+            for batch_key, batch in batches.items():
+                _trace_batch(batch_key, batch)
+                previous_processed = processed
+                processed += _process_batch(batch, model, processor, input_device, config, accumulator,
+                                            prediction_stream, result_writer,
+                                            generation_batch_minimum=_generation_batch_minimum(batch_key, config))
+                prediction_stream.flush()
+                result_stream.flush()
+                _report_progress(
+                    processed, config.progress_every, previous_processed=previous_processed, force=True)
+    except (Exception, KeyboardInterrupt):
+        if processed:
+            _write_score_outputs(paths, accumulator, config, processed, complete=False)
+        raise
+
+    if processed == 0:
+        raise ValueError(f'No records found in {config.val_dataset}.')
+    return _write_score_outputs(paths, accumulator, config, processed, complete=True)
+
+
+def _trace_batch(batch_key: Any, batch: Sequence[PreparedSample]) -> None:
+    if not os.environ.get('BENCHMARK_TRACE_BATCHES'):
+        return
+    line_numbers = ','.join(str(sample.line_number) for sample in batch)
+    print(
+        f'[custom-eval] batch key={batch_key!r} size={len(batch)} lines={line_numbers}',
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _restore_accumulator(paths: Mapping[str, Path], accumulator: ScoreAccumulator,
+                         config: EvalConfig) -> set[int]:
+    results_path = paths['results']
+    predictions_path = paths['predictions']
+    if not results_path.exists() and not predictions_path.exists():
+        return set()
+    if not results_path.is_file() or not predictions_path.is_file():
+        raise ValueError('--resume requires both predictions.jsonl and results.csv when either one exists.')
+
+    with results_path.open('r', encoding='utf-8', newline='') as stream:
+        result_rows = list(csv.DictReader(stream))
+    if config.retry_errors and any(row.get('error') for row in result_rows):
+        result_rows = _remove_failed_rows(paths, result_rows)
+
+    line_numbers: set[int] = set()
+    for row in result_rows:
+        line_number = int(row['line_number'])
+        if line_number in line_numbers:
+            raise ValueError(f'Cannot resume: duplicate dataset line {line_number} in {results_path}.')
+        line_numbers.add(line_number)
+        failed = bool(row.get('error'))
+        task = row.get('task')
+        if task == 'vqa':
+            accumulator.add_vqa({
+                'exact_match': float(row['exact_match']),
+                'vqa_accuracy': float(row['vqa_accuracy']),
+                'token_f1': float(row['token_f1']),
+            }, failed=failed)
+        elif task == 'description':
+            accumulator.add_description({
+                'token_f1': float(row['token_f1']),
+                'rouge_l': float(row['rouge_l']),
+                'bleu_4': float(row['bleu_4']),
+                'chrf': float(row['chrf']),
+            }, failed=failed)
+        elif task == 'grounding':
+            pred_boxes = json.loads(row.get('pred_boxes') or '[]')
+            gt_boxes = json.loads(row.get('gt_boxes') or '[]')
+            gt_count = len(gt_boxes)
+            iou_accuracy = float(row.get('iou_accuracy') or 0)
+            accumulator.add_grounding({
+                'parse_success': bool(int(row.get('parse_success') or 0)),
+                'gt_box_count': gt_count,
+                'pred_box_count': len(pred_boxes),
+                'matched_box_count': min(len(pred_boxes), gt_count),
+                'iou_sum': float(row.get('mean_iou') or 0) * gt_count,
+                'iou_hits': round(iou_accuracy * gt_count),
+                'complete': iou_accuracy >= 1.0 and len(pred_boxes) == gt_count,
+            }, failed=failed)
+        elif task == 'grounded':
+            pred_boxes = json.loads(row.get('pred_boxes') or '[]')
+            gt_boxes = json.loads(row.get('gt_boxes') or '[]')
+            gt_count = len(gt_boxes)
+            iou_accuracy = float(row.get('iou_accuracy') or 0)
+            accumulator.add_grounded({
+                'token_f1': float(row['token_f1']),
+                'rouge_l': float(row['rouge_l']),
+                'bleu_4': float(row['bleu_4']),
+                'chrf': float(row['chrf']),
+            }, {
+                'parse_success': bool(int(row.get('parse_success') or 0)),
+                'gt_box_count': gt_count,
+                'pred_box_count': len(pred_boxes),
+                'matched_box_count': min(len(pred_boxes), gt_count),
+                'iou_sum': float(row.get('mean_iou') or 0) * gt_count,
+                'iou_hits': round(iou_accuracy * gt_count),
+                'complete': iou_accuracy >= 1.0 and len(pred_boxes) == gt_count,
+            }, failed=failed)
+        else:
+            raise ValueError(f'Cannot resume: unsupported task {task!r} in {results_path}.')
+
+    with predictions_path.open('r', encoding='utf-8') as stream:
+        prediction_count = sum(1 for line in stream if line.strip())
+    if prediction_count != len(line_numbers):
+        raise ValueError(
+            f'Cannot resume: predictions.jsonl has {prediction_count} rows but results.csv has '
+            f'{len(line_numbers)} rows.')
+    if line_numbers:
+        print(f'[custom-eval] resuming after {len(line_numbers)} completed samples', file=sys.stderr, flush=True)
+    return line_numbers
+
+
+def _remove_failed_rows(paths: Mapping[str, Path], result_rows: Sequence[Mapping[str, str]]) -> List[Dict[str, str]]:
+    predictions_path = paths['predictions']
+    results_path = paths['results']
+    predictions_temp = predictions_path.with_suffix('.jsonl.retry.tmp')
+    results_temp = results_path.with_suffix('.csv.retry.tmp')
+    kept_rows: List[Dict[str, str]] = []
+    prediction_count = 0
+    with predictions_path.open('r', encoding='utf-8') as prediction_stream, \
+            predictions_temp.open('w', encoding='utf-8', newline='\n') as prediction_output, \
+            results_temp.open('w', encoding='utf-8', newline='') as result_output:
+        writer = csv.DictWriter(result_output, fieldnames=PREDICTION_COLUMNS)
+        writer.writeheader()
+        for row in result_rows:
+            prediction_line = prediction_stream.readline()
+            if not prediction_line:
+                raise ValueError('Cannot retry errors: predictions.jsonl has fewer rows than results.csv.')
+            prediction_count += 1
+            if row.get('error'):
+                continue
+            prediction_output.write(prediction_line)
+            normalized_row = dict(row)
+            writer.writerow(normalized_row)
+            kept_rows.append(normalized_row)
+        if any(line.strip() for line in prediction_stream):
+            raise ValueError('Cannot retry errors: predictions.jsonl has more rows than results.csv.')
+    predictions_temp.replace(predictions_path)
+    results_temp.replace(results_path)
+    removed = prediction_count - len(kept_rows)
+    print(f'[custom-eval] retrying {removed} previously failed samples', file=sys.stderr, flush=True)
+    return kept_rows
+
+
+def _write_score_outputs(paths: Mapping[str, Path], accumulator: ScoreAccumulator, config: EvalConfig,
+                         processed: int, complete: bool) -> List[Dict[str, Any]]:
+    summary_rows = accumulator.summary_rows(config.model_name, config.dataset_name)
+    _write_scores_csv(paths['scores_csv'], summary_rows)
+    report = {
+        'status': 'complete' if complete else 'partial',
+        'processed_samples': processed,
+        'model': config.model_name,
+        'model_type': config.model_type,
+        'model_weights': str(config.model_weights),
+        'val_dataset': str(config.val_dataset),
+        'iou_threshold': config.iou_threshold,
+        'prediction_space': config.prediction_space,
+        'max_image_pixels': config.max_image_pixels,
+        'min_video_frames': config.min_video_frames,
+        'max_video_frames': config.max_video_frames,
+        'video_backend': config.video_backend,
+        'allow_empty_video_fallback': config.allow_empty_video_fallback,
+        'group_image_batches': config.group_image_batches,
+        'group_video_batches': config.group_video_batches,
+        'min_video_batch_size': config.min_video_batch_size,
+        'outputs': {
+            key: str(value)
+            for key, value in paths.items()
+        },
+        'scores': summary_rows,
+    }
+    paths['scores_json'].write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    return summary_rows
+
+
+def _process_batch(samples: Sequence[PreparedSample], model: Any, processor: Any, input_device: Any, config: EvalConfig,
+                   accumulator: ScoreAccumulator, prediction_stream: Any, result_writer: csv.DictWriter,
+                   generation_batch_minimum: int = 1) -> int:
+    message_batches = [sample.messages for sample in samples]
+    while len(message_batches) < generation_batch_minimum:
+        message_batches.append(message_batches[-1])
+    try:
+        predictions = _generate(message_batches, model, processor, input_device, config.max_new_tokens)[:len(samples)]
+        errors = [''] * len(samples)
+    except Exception as error:
+        if len(samples) > 1:
+            predictions, errors = [], []
+            for sample in samples:
+                try:
+                    single_batch = [sample.messages] * generation_batch_minimum
+                    predictions.append(
+                        _generate(single_batch, model, processor, input_device, config.max_new_tokens)[0])
+                    errors.append('')
+                except Exception as item_error:
+                    if not config.continue_on_error:
+                        raise RuntimeError(
+                            f'Generation failed at dataset line {sample.line_number} '
+                            f'(sample_id={sample.sample_id}): {item_error}') from item_error
+                    predictions.append('')
+                    errors.append(str(item_error))
+        elif config.continue_on_error:
+            predictions, errors = [''], [str(error)]
+        else:
+            raise
+
+    for sample, prediction, error in zip(samples, predictions, errors):
+        prediction_record = dict(sample.record)
+        prediction_record.update({
+            'sample_id': sample.sample_id,
+            'task': sample.task,
+            'response': prediction,
+            'labels': sample.references,
+        })
+        if error:
+            prediction_record['eval_error'] = error
+        prediction_stream.write(json.dumps(prediction_record, ensure_ascii=False) + '\n')
+
+        row: Dict[str, Any] = {
+            'model': config.model_name,
+            'dataset': config.dataset_name,
+            'sample_id': sample.sample_id,
+            'line_number': sample.line_number,
+            'task': sample.task,
+            'question': sample.question,
+            'reference': json.dumps(sample.references, ensure_ascii=False),
+            'prediction': prediction,
+            'error': error,
+        }
+        if sample.task == 'vqa':
+            scores = vqa_scores(prediction, sample.references)
+            row.update(scores)
+            accumulator.add_vqa(scores, failed=bool(error))
+        elif sample.task == 'description':
+            scores = description_scores(prediction, sample.references)
+            row.update(scores)
+            accumulator.add_description(scores, failed=bool(error))
+        elif sample.task == 'grounding':
+            scores = grounding_scores(sample.record, prediction, config.prediction_space, config.iou_threshold,
+                                      config.val_dataset.parent)
+            row.update({
+                'pred_boxes': json.dumps(scores['pred_boxes']),
+                'gt_boxes': json.dumps(scores['gt_boxes']),
+                'mean_iou': scores['mean_iou'],
+                'iou_accuracy': scores['iou_accuracy'],
+                'parse_success': int(scores['parse_success']),
+            })
+            accumulator.add_grounding(scores, failed=bool(error))
+        elif sample.task == 'grounded':
+            description = grounded_description_scores(prediction, sample.references)
+            grounding = grounding_scores(sample.record, prediction, config.prediction_space, config.iou_threshold,
+                                         config.val_dataset.parent)
+            row.update(description)
+            row.update({
+                'pred_boxes': json.dumps(grounding['pred_boxes']),
+                'gt_boxes': json.dumps(grounding['gt_boxes']),
+                'mean_iou': grounding['mean_iou'],
+                'iou_accuracy': grounding['iou_accuracy'],
+                'parse_success': int(grounding['parse_success']),
+            })
+            accumulator.add_grounded(description, grounding, failed=bool(error))
+        else:
+            raise ValueError(f'Unsupported task: {sample.task}.')
+        result_writer.writerow(row)
+    return len(samples)
+
+
+def _processor_compat_kwargs(processor_source: Path) -> Dict[str, Any]:
+    tokenizer_config = processor_source / 'tokenizer_config.json'
+    if not tokenizer_config.is_file():
+        return {}
+    try:
+        data = json.loads(tokenizer_config.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    # Older ms-swift checkpoints saved this field as a list; Transformers 4.57 expects a mapping.
+    if isinstance(data, Mapping) and isinstance(data.get('extra_special_tokens'), list):
+        return {'extra_special_tokens': {}}
+    return {}
+
+
+def _load_model(config: EvalConfig) -> Tuple[Any, Any, Any]:
+    try:
+        import torch
+        from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
+    except ImportError as error:
+        raise RuntimeError('Direct evaluation requires torch and transformers.') from error
+
+    processor_source = config.base_model or config.model_weights
+    model_source = config.base_model or config.model_weights
+    hf_config = AutoConfig.from_pretrained(
+        str(model_source), trust_remote_code=config.trust_remote_code, local_files_only=True)
+    detected_model_type = str(getattr(hf_config, 'model_type', '') or '').strip()
+    if config.model_type and config.model_type != detected_model_type:
+        raise ValueError(
+            f'--model-type is {config.model_type!r}, but {model_source}/config.json declares '
+            f'{detected_model_type!r}.')
+    config.model_type = config.model_type or detected_model_type
+    _normalize_model_config(hf_config)
+
+    processor = AutoProcessor.from_pretrained(
+        str(processor_source), trust_remote_code=config.trust_remote_code, local_files_only=True,
+        **_processor_compat_kwargs(processor_source))
+    if config.max_image_pixels is not None:
+        image_processor = getattr(processor, 'image_processor', None)
+        image_size = getattr(image_processor, 'size', None)
+        if image_size is None or 'longest_edge' not in image_size:
+            raise ValueError(f'Processor loaded from {processor_source} does not support --max-image-pixels.')
+        minimum = image_size.get('shortest_edge')
+        if minimum is not None and config.max_image_pixels < minimum:
+            raise ValueError(f'--max-image-pixels must be at least the processor minimum of {minimum}.')
+        image_size['longest_edge'] = config.max_image_pixels
+    if config.min_video_frames is not None or config.max_video_frames is not None:
+        video_processor = getattr(processor, 'video_processor', None)
+        if video_processor is None or not all(
+                hasattr(video_processor, name) for name in ('min_frames', 'max_frames')):
+            raise ValueError(f'Processor loaded from {processor_source} does not support video frame limits.')
+        if config.min_video_frames is not None:
+            video_processor.min_frames = config.min_video_frames
+        if config.max_video_frames is not None:
+            video_processor.max_frames = config.max_video_frames
+    _configure_image_cache(processor)
+    _configure_video_backend(
+        processor, config.video_backend,
+        allow_empty_video_fallback=config.allow_empty_video_fallback,
+        minimum_frames=config.min_video_frames or 2)
+    tokenizer = getattr(processor, 'tokenizer', None)
+    if tokenizer is None:
+        raise RuntimeError(f'Processor loaded from {processor_source} does not expose a tokenizer.')
+    tokenizer.padding_side = 'left'
+    dtype: Any = 'auto'
+    if config.dtype != 'auto':
+        dtype = {'float32': torch.float32, 'float16': torch.float16, 'bfloat16': torch.bfloat16}[config.dtype]
+    load_kwargs: Dict[str, Any] = {
+        'config': hf_config,
+        'dtype': dtype,
+        'trust_remote_code': config.trust_remote_code,
+        'local_files_only': True,
+    }
+    if config.attn_implementation != 'auto':
+        load_kwargs['attn_implementation'] = config.attn_implementation
+    if config.device == 'auto':
+        load_kwargs['device_map'] = 'auto'
+    model_class = AutoModelForImageTextToText
+    if config.model_type == 'qwen3_vl':
+        try:
+            from transformers import Qwen3VLForConditionalGeneration
+        except ImportError as error:
+            raise RuntimeError('qwen3_vl evaluation requires a Transformers version with Qwen3-VL support.') from error
+        model_class = Qwen3VLForConditionalGeneration
+    model = model_class.from_pretrained(str(model_source), **load_kwargs)
+    if config.base_model:
+        try:
+            from peft import PeftModel
+        except ImportError as error:
+            raise RuntimeError('Loading LoRA weights requires peft.') from error
+        model = PeftModel.from_pretrained(model, str(config.model_weights))
+    if config.device != 'auto':
+        model = model.to(config.device)
+    model_config = getattr(model, 'config', None)
+    cache_configs = (
+        model_config,
+        getattr(model_config, 'text_config', None),
+        getattr(model, 'generation_config', None),
+    )
+    for cache_config in cache_configs:
+        if cache_config is not None and hasattr(cache_config, 'use_cache'):
+            cache_config.use_cache = True
+    model.eval()
+    input_device = getattr(model, 'device', None)
+    if input_device is None:
+        input_device = next(model.parameters()).device
+    return model, processor, input_device
+
+
+def _normalize_model_config(hf_config: Any) -> None:
+    if getattr(hf_config, 'model_type', None) != 'qwen3_vl':
+        return
+    text_config = getattr(hf_config, 'text_config', None)
+    if text_config is None or isinstance(getattr(text_config, 'rope_scaling', None), Mapping):
+        return
+    rope_parameters = getattr(text_config, 'rope_parameters', None)
+    if not isinstance(rope_parameters, Mapping):
+        return
+    rope_scaling = {
+        key: value
+        for key, value in rope_parameters.items()
+        if key != 'rope_theta'
+    }
+    if rope_scaling:
+        text_config.rope_scaling = rope_scaling
+
+
+def _configure_image_cache(processor: Any) -> None:
+    image_processor = getattr(processor, 'image_processor', None)
+    if image_processor is None or not hasattr(image_processor, 'fetch_images'):
+        return
+    original_fetch_images = image_processor.fetch_images
+    cached_key: Optional[str] = None
+    cached_image: Any = None
+
+    def fetch_images(image_url_or_urls: Any) -> Any:
+        nonlocal cached_key, cached_image
+        if isinstance(image_url_or_urls, list):
+            return [fetch_images(value) for value in image_url_or_urls]
+        if not isinstance(image_url_or_urls, str):
+            return original_fetch_images(image_url_or_urls)
+        if image_url_or_urls != cached_key:
+            cached_image = original_fetch_images(image_url_or_urls)
+            cached_key = image_url_or_urls
+        return cached_image
+
+    image_processor.fetch_images = fetch_images
+
+
+def _configure_video_backend(
+        processor: Any, backend: str, allow_empty_video_fallback: bool = False,
+        minimum_frames: int = 2) -> None:
+    if backend == 'auto':
+        return
+    video_processor = getattr(processor, 'video_processor', None)
+    if video_processor is None or not hasattr(video_processor, 'fetch_videos'):
+        raise ValueError(f'Processor does not support --video-backend {backend}.')
+    from transformers.video_utils import load_video
+
+    cached_key: Optional[str] = None
+    cached_video: Any = None
+
+    def load_with_fallback(video_url_or_urls: Any, sample_indices_fn: Any) -> Any:
+        decode_error: Optional[BaseException] = None
+        candidates = [backend]
+        if isinstance(video_url_or_urls, str) and not video_url_or_urls.startswith(('http://', 'https://')):
+            candidates.extend(value for value in ('pyav', 'opencv') if value != backend)
+        for candidate in candidates:
+            try:
+                loaded = load_video(
+                    video_url_or_urls, backend=candidate, sample_indices_fn=sample_indices_fn)
+                if candidate != backend:
+                    print(
+                        f'[custom-eval] decoded {video_url_or_urls} with fallback backend {candidate}.',
+                        file=sys.stderr, flush=True)
+                canonical_size = (1080, 1920) if allow_empty_video_fallback else None
+                return _ensure_minimum_video_frames(
+                    loaded, minimum_frames=minimum_frames, canonical_size=canonical_size)
+            except Exception as error:
+                if decode_error is None:
+                    decode_error = error
+
+        if allow_empty_video_fallback and _is_tiny_local_video(video_url_or_urls):
+            import numpy as np
+            from transformers.video_utils import VideoMetadata
+
+            print(
+                f'[custom-eval] no decodable video stream in {video_url_or_urls}; using two black frames.',
+                file=sys.stderr, flush=True)
+            frames = np.zeros((minimum_frames, 1080, 1920, 3), dtype=np.uint8)
+            metadata = VideoMetadata(
+                total_num_frames=minimum_frames, fps=1.0, width=1920, height=1080,
+                duration=float(minimum_frames), video_backend='empty-video-fallback',
+                frames_indices=list(range(minimum_frames)))
+            return frames, metadata
+        if decode_error is not None:
+            raise decode_error
+        raise RuntimeError(f'Unable to decode video: {video_url_or_urls}')
+
+    def fetch_videos(video_url_or_urls: Any, sample_indices_fn: Any = None) -> Any:
+        nonlocal cached_key, cached_video
+        if isinstance(video_url_or_urls, list):
+            return list(zip(*(fetch_videos(value, sample_indices_fn) for value in video_url_or_urls)))
+        # BaseVideoProcessor creates a fresh partial(sample_frames, ...) for every
+        # batch even though one evaluation run keeps the sampling config fixed.
+        cache_key = str(video_url_or_urls)
+        if cache_key != cached_key:
+            cached_video = load_with_fallback(video_url_or_urls, sample_indices_fn)
+            cached_key = cache_key
+        return cached_video
+
+    video_processor.fetch_videos = fetch_videos
+
+
+def _sample_batch_key(sample: PreparedSample, processor: Any, config: EvalConfig) -> Any:
+    if config.group_image_batches:
+        image_paths = _sample_media_paths(sample, 'image')
+        if len(image_paths) == 1:
+            return ('image', *_image_grid_signature(str(image_paths[0]), processor))
+        if image_paths:
+            return ('sample', sample.line_number)
+    if config.group_video_batches:
+        video_paths = _sample_media_paths(sample, 'video')
+        if len(video_paths) == 1:
+            signature = _video_grid_signature(
+                str(video_paths[0]), processor, canonicalize_single_frame=config.allow_empty_video_fallback)
+            return ('video', *signature)
+        if video_paths:
+            return ('sample', sample.line_number)
+    return 'default'
+
+
+def _sample_media_paths(sample: PreparedSample, media_type: str) -> List[Any]:
+    paths = []
+    for message in sample.messages:
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        paths.extend(
+            item.get(media_type) for item in content
+            if isinstance(item, Mapping) and item.get('type') == media_type and item.get(media_type))
+    return paths
+
+
+def _generation_batch_minimum(batch_key: Any, config: EvalConfig) -> int:
+    if isinstance(batch_key, tuple) and len(batch_key) == 4 and batch_key[0] == 'video':
+        return config.min_video_batch_size
+    return 1
+
+
+def _image_grid_signature(image_path: str, processor: Any) -> Tuple[int, int]:
+    image_processor = getattr(processor, 'image_processor', None)
+    if image_processor is None:
+        raise ValueError('--group-image-batches requires a processor with image_processor.')
+    patch_size = int(getattr(image_processor, 'patch_size', 16))
+    merge_size = int(getattr(image_processor, 'merge_size', 2))
+    size = getattr(image_processor, 'size', {})
+    min_pixels = int(size.get('shortest_edge', 65536))
+    max_pixels = int(size.get('longest_edge', 1048576))
+
+    from PIL import Image, ImageOps
+
+    with Image.open(image_path) as image:
+        image = ImageOps.exif_transpose(image)
+        width, height = image.size
+    resized_height, resized_width = _smart_image_resize(
+        height, width, factor=patch_size * merge_size,
+        min_pixels=min_pixels, max_pixels=max_pixels)
+    return resized_height // patch_size, resized_width // patch_size
+
+
+def _smart_image_resize(
+        height: int, width: int, factor: int,
+        min_pixels: int, max_pixels: int) -> Tuple[int, int]:
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(f'absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}')
+    resized_height = round(height / factor) * factor
+    resized_width = round(width / factor) * factor
+    if resized_height * resized_width > max_pixels:
+        scale = math.sqrt((height * width) / max_pixels)
+        resized_height = max(factor, math.floor(height / scale / factor) * factor)
+        resized_width = max(factor, math.floor(width / scale / factor) * factor)
+    elif resized_height * resized_width < min_pixels:
+        scale = math.sqrt(min_pixels / (height * width))
+        resized_height = math.ceil(height * scale / factor) * factor
+        resized_width = math.ceil(width * scale / factor) * factor
+    return resized_height, resized_width
+
+
+def _video_grid_signature(
+        video_path: str, processor: Any, canonicalize_single_frame: bool = False) -> Tuple[int, int, int]:
+    video_processor = getattr(processor, 'video_processor', None)
+    if video_processor is None:
+        raise ValueError('--group-video-batches requires a processor with video_processor.')
+    temporal_patch_size = int(getattr(video_processor, 'temporal_patch_size', 2))
+    patch_size = int(getattr(video_processor, 'patch_size', 16))
+    merge_size = int(getattr(video_processor, 'merge_size', 2))
+    size = getattr(video_processor, 'size', {})
+    min_pixels = int(size.get('shortest_edge', 4096))
+    max_pixels = int(size.get('longest_edge', 25165824))
+
+    path = Path(video_path)
+    total_frames = 0
+    source_fps: Optional[float] = None
+    height, width = 1080, 1920
+    if not _is_tiny_local_video(path):
+        try:
+            from decord import VideoReader
+
+            reader = VideoReader(str(path))
+            total_frames = len(reader)
+            source_fps = float(reader.get_avg_fps())
+            height, width = (int(value) for value in reader[0].shape[:2])
+        except Exception:
+            if not canonicalize_single_frame:
+                raise
+    if total_frames <= 1 and canonicalize_single_frame:
+        sampled_frames = max(
+            temporal_patch_size, int(getattr(video_processor, 'min_frames', temporal_patch_size)))
+        height, width = 1080, 1920
+    else:
+        target_fps = getattr(video_processor, 'fps', None)
+        min_frames = int(getattr(video_processor, 'min_frames', temporal_patch_size))
+        max_frames = int(getattr(video_processor, 'max_frames', total_frames))
+        if target_fps is not None and source_fps:
+            sampled_frames = int(total_frames / source_fps * float(target_fps))
+            sampled_frames = min(min(max(sampled_frames, min_frames), max_frames), total_frames)
+        else:
+            sampled_frames = min(max(total_frames, min_frames), max_frames)
+        if sampled_frames < temporal_patch_size:
+            sampled_frames = temporal_patch_size
+
+    resized_height, resized_width = _smart_video_resize(
+        sampled_frames, height, width,
+        temporal_factor=temporal_patch_size,
+        factor=patch_size * merge_size,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
+    grid_t = math.ceil(sampled_frames / temporal_patch_size)
+    return grid_t, resized_height // patch_size, resized_width // patch_size
+
+
+def _smart_video_resize(
+        num_frames: int, height: int, width: int, temporal_factor: int,
+        factor: int, min_pixels: int, max_pixels: int) -> Tuple[int, int]:
+    if num_frames < temporal_factor:
+        raise ValueError(f't:{num_frames} must be larger than temporal_factor:{temporal_factor}')
+    if height < factor or width < factor:
+        raise ValueError(f'height:{height} or width:{width} must be larger than factor:{factor}')
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(f'absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}')
+
+    resized_height = round(height / factor) * factor
+    resized_width = round(width / factor) * factor
+    resized_frames = round(num_frames / temporal_factor) * temporal_factor
+    if resized_frames * resized_height * resized_width > max_pixels:
+        scale = math.sqrt((num_frames * height * width) / max_pixels)
+        resized_height = max(factor, math.floor(height / scale / factor) * factor)
+        resized_width = max(factor, math.floor(width / scale / factor) * factor)
+    elif resized_frames * resized_height * resized_width < min_pixels:
+        scale = math.sqrt(min_pixels / (num_frames * height * width))
+        resized_height = math.ceil(height * scale / factor) * factor
+        resized_width = math.ceil(width * scale / factor) * factor
+    return resized_height, resized_width
+
+
+def _ensure_minimum_video_frames(
+        loaded: Any, minimum_frames: int = 2,
+        canonical_size: Optional[Tuple[int, int]] = None) -> Any:
+    if not isinstance(loaded, tuple) or len(loaded) != 2:
+        return loaded
+    frames, metadata = loaded
+    try:
+        frame_count = len(frames)
+    except TypeError:
+        return loaded
+    if frame_count >= minimum_frames:
+        return loaded
+    if frame_count == 0:
+        raise ValueError('Decoded video has no frames.')
+
+    if hasattr(frames, 'ndim') and getattr(frames, 'ndim') == 4:
+        if canonical_size is not None:
+            frames = _letterbox_video_frames(frames, canonical_size)
+        frames = frames[[0] * minimum_frames]
+    elif isinstance(frames, tuple):
+        frames = tuple([frames[0]] * minimum_frames)
+    elif isinstance(frames, list):
+        frames = [frames[0]] * minimum_frames
+    else:
+        return loaded
+
+    indices = getattr(metadata, 'frames_indices', None)
+    if indices is not None and len(indices):
+        metadata.frames_indices = [indices[0]] * minimum_frames
+    print(
+        f'[custom-eval] padded a {frame_count}-frame video to {minimum_frames} frames.',
+        file=sys.stderr, flush=True)
+    return frames, metadata
+
+
+def _letterbox_video_frames(frames: Any, target_size: Tuple[int, int]) -> Any:
+    import numpy as np
+    from PIL import Image
+
+    target_height, target_width = target_size
+    if tuple(frames.shape[1:3]) == target_size:
+        return frames
+    normalized = []
+    for frame in frames:
+        image = Image.fromarray(np.asarray(frame, dtype=np.uint8)).convert('RGB')
+        scale = min(target_width / image.width, target_height / image.height)
+        resized_size = (
+            max(1, round(image.width * scale)),
+            max(1, round(image.height * scale)),
+        )
+        image = image.resize(resized_size, Image.Resampling.BILINEAR)
+        canvas = Image.new('RGB', (target_width, target_height))
+        offset = ((target_width - image.width) // 2, (target_height - image.height) // 2)
+        canvas.paste(image, offset)
+        normalized.append(np.asarray(canvas))
+    print(
+        f'[custom-eval] letterboxed a short video to {target_width}x{target_height}.',
+        file=sys.stderr, flush=True)
+    return np.stack(normalized)
+
+
+def _is_tiny_local_video(value: Any, maximum_bytes: int = 4096) -> bool:
+    if not isinstance(value, (str, Path)):
+        return False
+    path = Path(value)
+    try:
+        return path.is_file() and path.stat().st_size <= maximum_bytes
+    except OSError:
+        return False
+
+
+def _generate(message_batches: Sequence[List[Dict[str, Any]]], model: Any, processor: Any, input_device: Any,
+              max_new_tokens: int) -> List[str]:
+    import torch
+
+    conversations: Any = list(message_batches)
+    if len(conversations) == 1:
+        conversations = conversations[0]
+    inputs = processor.apply_chat_template(
+        conversations,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors='pt',
+        padding=True,
+    )
+    inputs = inputs.to(input_device)
+
+    def generate(use_safe_sdpa: bool) -> Any:
+        if use_safe_sdpa:
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            backends = [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+            with torch.inference_mode(), sdpa_kernel(backends):
+                return model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        with torch.inference_mode():
+            return model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+
+    force_safe_sdpa = bool(getattr(model, '_benchmark_force_safe_sdpa', False))
+    try:
+        generated = generate(force_safe_sdpa)
+    except RuntimeError as error:
+        if force_safe_sdpa or not _is_attention_shape_error(error):
+            raise
+        setattr(model, '_benchmark_force_safe_sdpa', True)
+        print('[custom-eval] Flash SDP shape error; switching the remaining run to memory-efficient SDP.',
+              file=sys.stderr, flush=True)
+        generated = generate(use_safe_sdpa=True)
+    prompt_length = inputs['input_ids'].shape[1]
+    trimmed = [tokens[prompt_length:] for tokens in generated]
+    return processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+
+
+def _is_attention_shape_error(error: BaseException) -> bool:
+    message = str(error).casefold()
+    return 'q must have shape' in message and 'num_heads' in message
+
+
+def _prepare_messages(messages: Sequence[Any], record: Mapping[str, Any], dataset_dir: Path) -> List[Dict[str, Any]]:
+    images = _image_values(record)
+    videos = _video_values(record)
+    image_index = 0
+    video_index = 0
+    ref_index = 0
+    bbox_index = 0
+    result: List[Dict[str, Any]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, Mapping):
+            raise ValueError('Each message must be an object.')
+        role = str(raw_message.get('role', '')).lower()
+        if role not in {'system', 'user', 'assistant'}:
+            raise ValueError(f'Unsupported message role: {role!r}.')
+        content = raw_message.get('content', '')
+        if isinstance(content, str):
+            content, image_index, video_index, ref_index, bbox_index = _prepare_text_content(
+                content, role, images, videos, image_index, video_index, ref_index, bbox_index, record, dataset_dir)
+        elif isinstance(content, list):
+            prepared_content: List[Dict[str, Any]] = []
+            for item in content:
+                if not isinstance(item, Mapping):
+                    prepared_content.append({'type': 'text', 'text': str(item)})
+                    continue
+                if item.get('type') == 'text' or 'text' in item:
+                    text, image_index, video_index, ref_index, bbox_index = _prepare_text_content(
+                        str(item.get('text', '')), role, images, videos, image_index, video_index, ref_index,
+                        bbox_index, record, dataset_dir)
+                    prepared_content.extend(text if isinstance(text, list) else [{'type': 'text', 'text': text}])
+                elif item.get('type') == 'image' or 'image' in item or 'image_url' in item:
+                    value = item.get('image', item.get('image_url'))
+                    prepared_content.append({'type': 'image', 'image': _resolve_media(value, dataset_dir)})
+                    image_index += 1
+                elif item.get('type') == 'video' or 'video' in item:
+                    prepared_content.append({'type': 'video', 'video': _resolve_media(item.get('video'), dataset_dir)})
+                    video_index += 1
+                else:
+                    prepared_content.append(dict(item))
+            content = prepared_content
+        else:
+            content = str(content)
+        if (images or videos) and isinstance(content, str):
+            content = [{'type': 'text', 'text': content}]
+        result.append({'role': role, 'content': content})
+    if image_index != len(images):
+        raise ValueError(f'Found {image_index} image placeholders but record contains {len(images)} images.')
+    if video_index != len(videos):
+        raise ValueError(f'Found {video_index} video placeholders but record contains {len(videos)} videos.')
+    return result
+
+
+def _prepare_text_content(text: str, role: str, images: Sequence[Any], videos: Sequence[Any], image_index: int,
+                          video_index: int, ref_index: int, bbox_index: int, record: Mapping[str, Any],
+                          dataset_dir: Path) -> Tuple[Any, int, int, int, int]:
+    objects = record.get('objects') if isinstance(record.get('objects'), Mapping) else {}
+    refs = objects.get('ref') if isinstance(objects.get('ref'), list) else []
+    boxes = objects.get('bbox') if isinstance(objects.get('bbox'), list) else []
+    while '<ref-object>' in text and ref_index < len(refs):
+        replacement = f'<|object_ref_start|>{refs[ref_index]}<|object_ref_end|>'
+        text = text.replace('<ref-object>', replacement, 1)
+        ref_index += 1
+    while '<bbox>' in text and bbox_index < len(boxes):
+        image_ids = objects.get('image_id') if isinstance(objects.get('image_id'), list) else []
+        target_image = int(image_ids[bbox_index]) if bbox_index < len(image_ids) else 0
+        size = _image_size(images[target_image], dataset_dir)
+        box = _box_to_norm1000(_coerce_box(boxes[bbox_index]), str(objects.get('bbox_type') or 'real'), size)
+        box_text = f'<|box_start|>({box[0]},{box[1]}),({box[2]},{box[3]})<|box_end|>'
+        text = text.replace('<bbox>', box_text, 1)
+        bbox_index += 1
+    matches = list(MEDIA_TOKEN_RE.finditer(text))
+    if not matches:
+        return text, image_index, video_index, ref_index, bbox_index
+    if role != 'user':
+        raise ValueError('<image> and <video> are only supported in user messages.')
+    content: List[Dict[str, Any]] = []
+    cursor = 0
+    for match in matches:
+        if match.start() > cursor:
+            content.append({'type': 'text', 'text': text[cursor:match.start()]})
+        media_type = match.group(1).lower()
+        if media_type == 'image':
+            if image_index >= len(images):
+                raise ValueError('More <image> placeholders than values in images.')
+            content.append({'type': 'image', 'image': _resolve_media(images[image_index], dataset_dir)})
+            image_index += 1
+        else:
+            if video_index >= len(videos):
+                raise ValueError('More <video> placeholders than values in videos.')
+            content.append({'type': 'video', 'video': _resolve_media(videos[video_index], dataset_dir)})
+            video_index += 1
+        cursor = match.end()
+    if cursor < len(text):
+        content.append({'type': 'text', 'text': text[cursor:]})
+    return content, image_index, video_index, ref_index, bbox_index
+
+
+def _messages_before_reference(messages: Sequence[Any]) -> List[Any]:
+    last_assistant = max((index for index, message in enumerate(messages)
+                          if isinstance(message, Mapping) and str(message.get('role', '')).lower() == 'assistant'),
+                         default=len(messages))
+    result = list(messages[:last_assistant])
+    if not result:
+        raise ValueError('No prompt messages remain after removing the reference answer.')
+    return result
+
+
+def _reference_answers(record: Mapping[str, Any]) -> List[str]:
+    for key in ('answers', 'labels', 'label', 'answer', 'target', 'ground_truth'):
+        value = record.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            answers = []
+            for item in value:
+                if isinstance(item, Mapping):
+                    item = item.get('answer', item.get('text'))
+                if item is not None:
+                    answers.append(str(item))
+            if answers:
+                return _expand_reference_placeholders(record, answers)
+            continue
+        return _expand_reference_placeholders(record, [str(value)])
+    messages = record.get('messages')
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if isinstance(message, Mapping) and str(message.get('role', '')).lower() == 'assistant':
+                content = message.get('content')
+                if isinstance(content, str):
+                    return _expand_reference_placeholders(record, [content])
+    return []
+
+
+def _expand_reference_placeholders(record: Mapping[str, Any], answers: Sequence[str]) -> List[str]:
+    objects = record.get('objects')
+    refs = objects.get('ref') if isinstance(objects, Mapping) and isinstance(objects.get('ref'), list) else []
+    expanded = []
+    for answer in answers:
+        text = str(answer)
+        for ref in refs:
+            if '<ref-object>' not in text:
+                break
+            text = text.replace('<ref-object>', str(ref), 1)
+        expanded.append(text)
+    return expanded
+
+
+def _detect_task(record: Mapping[str, Any], requested: str) -> str:
+    if requested != 'auto':
+        return requested
+    references = _reference_answers(record)
+    objects = record.get('objects')
+    has_boxes = isinstance(objects, Mapping) and isinstance(objects.get('bbox'), list) and bool(objects['bbox'])
+    expects_boxes = any(_reference_contains_boxes(value) for value in references)
+    task_hint = str(record.get('task', record.get('task_type', ''))).casefold()
+    prompt = _raw_user_text(record)
+    grounding_hint = any(value in task_hint for value in (
+        'ground', 'localiz', 'localis', 'referring_expression', 'phrase_to_box', 'bbox'))
+    if has_boxes and expects_boxes and any(_description_tokens(grounded_description_text(value))
+                                           for value in references):
+        return 'grounded'
+    if has_boxes and (expects_boxes or grounding_hint):
+        return 'grounding'
+    if any(value in task_hint for value in ('description', 'describe', 'caption')):
+        return 'description'
+    if DESCRIPTION_PROMPT_RE.search(prompt) or any(value in prompt for value in ('描述', '图像说明', '图片说明')):
+        return 'description'
+    prompt_expects_boxes = bool(GROUNDING_PROMPT_RE.search(prompt)) or any(
+        value in prompt for value in ('定位', '边界框', '坐标'))
+    if has_boxes and prompt_expects_boxes:
+        return 'grounding'
+    return 'vqa'
+
+
+def _reference_contains_boxes(value: str) -> bool:
+    text = final_answer_text(str(value))
+    if '<bbox>' in text or '<|box_start|>' in text or TAGGED_BOX_RE.search(text):
+        return True
+    try:
+        return bool(parse_prediction_boxes(text))
+    except (TypeError, ValueError):
+        return False
+
+
+def _raw_user_text(record: Mapping[str, Any]) -> str:
+    messages = record.get('messages')
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if not isinstance(message, Mapping) or str(message.get('role', '')).lower() != 'user':
+                continue
+            content = message.get('content', '')
+            if isinstance(content, str):
+                return content.casefold()
+            if isinstance(content, list):
+                return ' '.join(str(item.get('text', '')) for item in content if isinstance(item, Mapping)).casefold()
+    return str(record.get('question', record.get('prompt', record.get('query', '')))).casefold()
+
+
+def _iter_records(path: Path) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    suffix = path.suffix.lower()
+    if suffix == '.jsonl':
+        with path.open('r', encoding='utf-8-sig') as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f'JSONL line {line_number} is not an object.')
+                yield line_number, value
+        return
+    if suffix == '.csv':
+        with path.open('r', encoding='utf-8-sig', newline='') as stream:
+            for line_number, record in enumerate(csv.DictReader(stream), start=2):
+                yield line_number, _decode_structured_fields(record)
+        return
+    if suffix == '.json':
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+        if isinstance(data, dict):
+            for key in ('data', 'items', 'records', 'results'):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+            else:
+                data = [data]
+        if not isinstance(data, list):
+            raise ValueError('JSON dataset must be an array or contain data/items/records/results.')
+        for index, value in enumerate(data, start=1):
+            if not isinstance(value, dict):
+                raise ValueError(f'JSON item {index} is not an object.')
+            yield index, value
+        return
+    raise ValueError(f'Unsupported val dataset format: {path.suffix}; use JSONL, JSON or CSV.')
+
+
+def _structured_candidates(text: str) -> Iterator[Any]:
+    for opening, closing in (('[', ']'), ('{', '}')):
+        start, end = text.find(opening), text.rfind(closing)
+        if 0 <= start < end:
+            candidate = text[start:end + 1]
+            try:
+                yield json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    yield ast.literal_eval(candidate)
+                except (ValueError, SyntaxError):
+                    pass
+
+
+def _boxes_from_structured(value: Any) -> List[Tuple[float, float, float, float]]:
+    if isinstance(value, str):
+        return _boxes_from_text_segment(value)
+    if isinstance(value, (list, tuple)):
+        if len(value) == 4 and all(_is_number(item) for item in value):
+            return [_coerce_box(value)]
+        boxes: List[Tuple[float, float, float, float]] = []
+        for item in value:
+            boxes.extend(_boxes_from_structured(item))
+        return boxes
+    if not isinstance(value, Mapping):
+        return []
+    boxes = []
+    recognized = False
+    for key in BOX_KEYS:
+        if key in value:
+            boxes.extend(_boxes_from_structured(value[key]))
+            recognized = True
+    for keys in (('x1', 'y1', 'x2', 'y2'), ('left', 'top', 'right', 'bottom')):
+        if all(key in value and _is_number(value[key]) for key in keys):
+            boxes.append(tuple(float(value[key]) for key in keys))
+            recognized = True
+    if not recognized:
+        for item in value.values():
+            if isinstance(item, (Mapping, list, tuple)):
+                boxes.extend(_boxes_from_structured(item))
+    return boxes
+
+
+def _boxes_from_text_segment(text: str) -> List[Tuple[float, float, float, float]]:
+    boxes = [tuple(float(value) for value in match.groups()) for match in PAIR_BOX_RE.finditer(text)]
+    if boxes:
+        return boxes
+    numbers = [float(value) for value in re.findall(NUMBER_RE, text)]
+    return [tuple(numbers)] if len(numbers) == 4 else []
+
+
+def _match_boxes(predictions: Sequence[Sequence[float]],
+                 ground_truth: Sequence[Sequence[float]]) -> List[Tuple[int, int, float]]:
+    if not predictions or not ground_truth:
+        return []
+    cost_matrix = [[1.0 - _box_iou(prediction, target) for target in ground_truth]
+                   for prediction in predictions]
+    return [(pred_index, gt_index, _box_iou(predictions[pred_index], ground_truth[gt_index]))
+            for pred_index, gt_index in _hungarian_minimize(cost_matrix)]
+
+
+def _hungarian_minimize(cost_matrix: Sequence[Sequence[float]]) -> List[Tuple[int, int]]:
+    """Return the minimum-cost one-to-one assignment for a rectangular matrix."""
+    if not cost_matrix or not cost_matrix[0]:
+        return []
+    original_rows = len(cost_matrix)
+    original_columns = len(cost_matrix[0])
+    transposed = original_rows > original_columns
+    if transposed:
+        matrix = [[float(cost_matrix[row][column]) for row in range(original_rows)]
+                  for column in range(original_columns)]
+    else:
+        matrix = [[float(value) for value in row] for row in cost_matrix]
+
+    row_count = len(matrix)
+    column_count = len(matrix[0])
+    row_potential = [0.0] * (row_count + 1)
+    column_potential = [0.0] * (column_count + 1)
+    matched_row = [0] * (column_count + 1)
+    previous_column = [0] * (column_count + 1)
+
+    for row in range(1, row_count + 1):
+        matched_row[0] = row
+        column0 = 0
+        minimum = [math.inf] * (column_count + 1)
+        used = [False] * (column_count + 1)
+        while True:
+            used[column0] = True
+            row0 = matched_row[column0]
+            delta = math.inf
+            column1 = 0
+            for column in range(1, column_count + 1):
+                if used[column]:
+                    continue
+                current = matrix[row0 - 1][column - 1] - row_potential[row0] - column_potential[column]
+                if current < minimum[column]:
+                    minimum[column] = current
+                    previous_column[column] = column0
+                if minimum[column] < delta:
+                    delta = minimum[column]
+                    column1 = column
+            for column in range(column_count + 1):
+                if used[column]:
+                    row_potential[matched_row[column]] += delta
+                    column_potential[column] -= delta
+                else:
+                    minimum[column] -= delta
+            column0 = column1
+            if matched_row[column0] == 0:
+                break
+        while True:
+            column1 = previous_column[column0]
+            matched_row[column0] = matched_row[column1]
+            column0 = column1
+            if column0 == 0:
+                break
+
+    assignment: List[Tuple[int, int]] = []
+    for column in range(1, column_count + 1):
+        row = matched_row[column]
+        if not row:
+            continue
+        pair = (row - 1, column - 1)
+        assignment.append((pair[1], pair[0]) if transposed else pair)
+    return assignment
+
+
+def _normalize_box(box: Sequence[float], coordinate_space: str,
+                   image_size: Optional[Tuple[int, int]]) -> Tuple[float, float, float, float]:
+    x1, y1, x2, y2 = [float(value) for value in box]
+    coordinate_space = coordinate_space.lower()
+    if coordinate_space in {'norm1000', 'normalized1000'}:
+        x1, x2, y1, y2 = x1 / 1000, x2 / 1000, y1 / 1000, y2 / 1000
+    elif coordinate_space in {'real', 'absolute', 'pixel', 'pixels'}:
+        if image_size is None:
+            raise ValueError('Pixel-space boxes require a readable image to determine width and height.')
+        width, height = image_size
+        x1, x2, y1, y2 = x1 / width, x2 / width, y1 / height, y2 / height
+    elif coordinate_space not in {'norm1', 'normalized'}:
+        raise ValueError(f'Unsupported coordinate space: {coordinate_space}.')
+    x1, x2 = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+    y1, y2 = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+    return x1, y1, x2, y2
+
+
+def _box_to_norm1000(box: Sequence[float], coordinate_space: str, image_size: Tuple[int,
+                                                                                    int]) -> Tuple[int, int, int, int]:
+    box = _normalize_box(box, coordinate_space, image_size)
+    return tuple(int(round(value * 1000)) for value in box)
+
+
+def _box_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    return _safe_div(intersection, area_a + area_b - intersection)
+
+
+def _token_f1(prediction: str, reference: str) -> float:
+    return _token_f1_tokens(prediction.split(), reference.split())
+
+
+def _token_f1_tokens(prediction_tokens: Sequence[str], reference_tokens: Sequence[str]) -> float:
+    if not prediction_tokens or not reference_tokens:
+        return float(prediction_tokens == reference_tokens)
+    common = sum((Counter(prediction_tokens) & Counter(reference_tokens)).values())
+    if not common:
+        return 0.0
+    precision, recall = common / len(prediction_tokens), common / len(reference_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _description_tokens(text: str) -> List[str]:
+    return DESCRIPTION_TOKEN_RE.findall(final_answer_text(text).casefold())
+
+
+def _rouge_l_f1(prediction: Sequence[str], reference: Sequence[str]) -> float:
+    if not prediction or not reference:
+        return float(prediction == reference)
+    previous = [0] * (len(reference) + 1)
+    for prediction_token in prediction:
+        current = [0]
+        for index, reference_token in enumerate(reference, start=1):
+            if prediction_token == reference_token:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    common = previous[-1]
+    precision = common / len(prediction)
+    recall = common / len(reference)
+    return _safe_div(2 * precision * recall, precision + recall)
+
+
+def _sentence_bleu(prediction: Sequence[str], references: Sequence[Sequence[str]], max_order: int = 4) -> float:
+    references = list(references)
+    if not prediction:
+        return float(any(not reference for reference in references))
+    references = [reference for reference in references if reference]
+    if not references:
+        return 0.0
+    precisions = []
+    zero_matches = 0
+    for order in range(1, min(max_order, len(prediction)) + 1):
+        prediction_counts = Counter(_ngrams(prediction, order))
+        maximum_reference_counts: Counter = Counter()
+        for reference in references:
+            reference_counts = Counter(_ngrams(reference, order))
+            for ngram, count in reference_counts.items():
+                maximum_reference_counts[ngram] = max(maximum_reference_counts[ngram], count)
+        matches = sum(min(count, maximum_reference_counts[ngram]) for ngram, count in prediction_counts.items())
+        total = sum(prediction_counts.values())
+        if matches:
+            precisions.append(matches / total)
+        else:
+            zero_matches += 1
+            precisions.append(1.0 / (2**zero_matches * total))
+    if not precisions:
+        return 0.0
+    prediction_length = len(prediction)
+    reference_length = min((len(value) for value in references),
+                           key=lambda length: (abs(length - prediction_length), length))
+    brevity_penalty = (1.0 if prediction_length > reference_length
+                       else math.exp(1 - reference_length / prediction_length))
+    return brevity_penalty * math.exp(sum(math.log(value) for value in precisions) / len(precisions))
+
+
+def _ngrams(tokens: Sequence[str], order: int) -> Iterator[Tuple[str, ...]]:
+    for index in range(len(tokens) - order + 1):
+        yield tuple(tokens[index:index + order])
+
+
+def _chrf(prediction: str, reference: str, max_order: int = 6, beta: float = 2.0) -> float:
+    prediction = re.sub(r'\s+', '', final_answer_text(prediction).casefold())
+    reference = re.sub(r'\s+', '', final_answer_text(reference).casefold())
+    if not prediction or not reference:
+        return float(prediction == reference)
+    precisions, recalls = [], []
+    for order in range(1, max_order + 1):
+        prediction_counts = Counter(prediction[index:index + order]
+                                    for index in range(len(prediction) - order + 1))
+        reference_counts = Counter(reference[index:index + order]
+                                   for index in range(len(reference) - order + 1))
+        if not prediction_counts or not reference_counts:
+            continue
+        matches = sum((prediction_counts & reference_counts).values())
+        precisions.append(matches / sum(prediction_counts.values()))
+        recalls.append(matches / sum(reference_counts.values()))
+    if not precisions:
+        return 0.0
+    precision = sum(precisions) / len(precisions)
+    recall = sum(recalls) / len(recalls)
+    beta_squared = beta**2
+    return _safe_div((1 + beta_squared) * precision * recall, beta_squared * precision + recall)
+
+
+def _image_values(record: Mapping[str, Any]) -> List[Any]:
+    images = record.get('images', record.get('image'))
+    if images is None:
+        return []
+    return list(images) if isinstance(images, (list, tuple)) else [images]
+
+
+def _video_values(record: Mapping[str, Any]) -> List[Any]:
+    videos = record.get('videos', record.get('video'))
+    if videos is None:
+        return []
+    return list(videos) if isinstance(videos, (list, tuple)) else [videos]
+
+
+def _resolve_media(value: Any, dataset_dir: Path) -> Any:
+    if isinstance(value, Mapping):
+        value = value.get('path', value.get('image', value.get('video', value.get('url', value))))
+    if not isinstance(value, str) or value.startswith(('http://', 'https://', 'data:')):
+        return value
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = dataset_dir / path
+    return str(path.resolve())
+
+
+def _image_size(value: Any, dataset_dir: Path) -> Tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as error:
+        raise RuntimeError('Grounding evaluation requires Pillow.') from error
+    resolved = _resolve_media(value, dataset_dir)
+    if isinstance(resolved, str):
+        return _read_image_size(resolved)
+    try:
+        with Image.open(resolved) as image:
+            return image.size
+    except Exception as error:
+        raise ValueError(f'Cannot read image size from {resolved!r}: {error}') from error
+
+
+@lru_cache(maxsize=100000)
+def _read_image_size(path: str) -> Tuple[int, int]:
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            return image.size
+    except Exception as error:
+        raise ValueError(f'Cannot read image size from {path!r}: {error}') from error
+
+
+def _decode_structured_fields(record: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ('messages', 'images', 'videos', 'objects', 'answers'):
+        value = record.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            record[key] = json.loads(value)
+        except json.JSONDecodeError:
+            try:
+                record[key] = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                pass
+    return record
+
+
+def _coerce_box(value: Any) -> Tuple[float, float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4 or not all(_is_number(item) for item in value):
+        raise ValueError(f'Bounding box must contain four finite numbers: {value!r}.')
+    return tuple(float(item) for item in value)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _deduplicate_boxes(boxes: Iterable[Sequence[float]]) -> List[Tuple[float, float, float, float]]:
+    result, seen = [], set()
+    for box in boxes:
+        box = _coerce_box(box)
+        key = tuple(round(value, 8) for value in box)
+        if key not in seen:
+            seen.add(key)
+            result.append(box)
+    return result
+
+
+def _sample_id(record: Mapping[str, Any], line_number: int) -> str:
+    for key in ('id', 'sample_id', 'question_id', 'uid'):
+        if record.get(key) is not None and str(record[key]).strip():
+            return str(record[key]).strip()
+    return str(line_number)
+
+
+def _last_user_text(messages: Sequence[Mapping[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get('role') != 'user':
+            continue
+        content = message.get('content', '')
+        if isinstance(content, str):
+            return content
+        return ''.join(str(item.get('text', '')) for item in content if isinstance(item, Mapping))
+    return ''
+
+
+def _write_scores_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    columns = ('model', 'dataset', 'task', 'num_samples', 'exact_match', 'vqa_accuracy', 'token_f1', 'rouge_l',
+               'bleu_4', 'chrf', 'mean_iou', 'iou_accuracy', 'grounding_precision', 'grounding_f1', 'sample_accuracy',
+               'parse_success_rate', 'failed_samples')
+    with path.open('w', encoding='utf-8', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _validate_config(config: EvalConfig) -> None:
+    config.val_dataset = config.val_dataset.expanduser().resolve()
+    config.model_weights = config.model_weights.expanduser().resolve()
+    config.output_dir = config.output_dir.expanduser().resolve()
+    if config.base_model:
+        config.base_model = config.base_model.expanduser().resolve()
+    if config.retry_errors and not config.resume:
+        raise ValueError('--retry-errors requires --resume.')
+    if not config.val_dataset.is_file():
+        raise ValueError(f'Val dataset does not exist: {config.val_dataset}.')
+    if not config.model_weights.is_dir():
+        raise ValueError(f'Model weights directory does not exist: {config.model_weights}.')
+    if config.base_model and not config.base_model.is_dir():
+        raise ValueError(f'Base model directory does not exist: {config.base_model}.')
+    if config.batch_size <= 0 or config.max_new_tokens <= 0:
+        raise ValueError('--batch-size and --max-new-tokens must be greater than zero.')
+    if config.limit is not None and config.limit <= 0:
+        raise ValueError('--limit must be greater than zero.')
+    if config.max_image_pixels is not None and config.max_image_pixels <= 0:
+        raise ValueError('--max-image-pixels must be greater than zero.')
+    if config.max_video_frames is not None and config.max_video_frames <= 0:
+        raise ValueError('--max-video-frames must be greater than zero.')
+    if config.min_video_frames is not None and config.min_video_frames <= 0:
+        raise ValueError('--min-video-frames must be greater than zero.')
+    if (config.min_video_frames is not None and config.max_video_frames is not None
+            and config.min_video_frames > config.max_video_frames):
+        raise ValueError('--min-video-frames cannot exceed --max-video-frames.')
+    if config.video_backend not in VIDEO_BACKENDS:
+        raise ValueError(f'Unsupported --video-backend: {config.video_backend}.')
+    if config.min_video_batch_size <= 0:
+        raise ValueError('--min-video-batch-size must be greater than zero.')
+    if not 0 <= config.iou_threshold <= 1:
+        raise ValueError('--iou-threshold must be between zero and one.')
+
+
+def _guard_outputs(paths: Iterable[Path], overwrite: bool) -> None:
+    existing = [str(path) for path in paths if path.exists()]
+    if existing and not overwrite:
+        raise ValueError('Output files already exist; pass --overwrite to replace them: ' + ', '.join(existing))
+
+
+def _report_progress(
+        processed: int, interval: int, force: bool = False, previous_processed: Optional[int] = None) -> None:
+    crossed_interval = (
+        interval > 0 and previous_processed is not None
+        and processed // interval > previous_processed // interval
+    )
+    if force or crossed_interval or (interval > 0 and previous_processed is None and processed % interval == 0):
+        print(f'[custom-eval] processed={processed}', file=sys.stderr, flush=True)
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
+
+
+__all__ = [
+    'EvalConfig', 'description_scores', 'final_answer_text', 'grounded_description_scores',
+    'grounded_description_text', 'grounding_scores', 'normalize_vqa_answer', 'parse_prediction_boxes',
+    'prepare_sample', 'run_custom_eval', 'vqa_scores'
+]
