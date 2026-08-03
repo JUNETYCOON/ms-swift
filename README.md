@@ -35,6 +35,7 @@
 - [News](#-news)
 - [Installation](#%EF%B8%8F-installation)
 - [Quick Start](#-quick-Start)
+- [Local Dataset Conversion](#local-dataset-conversion)
 - [Usage](#-Usage)
 - [License](#-License)
 - [Citation](#-citation)
@@ -111,6 +112,12 @@ You can contact us and communicate with us by adding our group:
 - 🔥 2024.07.24: Support for human preference alignment training for multimodal large models, including DPO/ORPO/SimPO/CPO/KTO/RM/PPO.
 - 🔥 2024.02.01: Support for Agent training! The training algorithm is derived from [this paper](https://arxiv.org/pdf/2309.00986.pdf).
 </details>
+
+## Local Dataset Conversion
+
+The grouped train/validation converter for Molmo2 VideoCapQA/VideoPoint/
+VideoSubtitleQA/VideoTrack, PixMo Cap/Points, and SpatialVLM is documented in
+[scripts/README_molmo_pixmo_spatial_conversion.md](scripts/README_molmo_pixmo_spatial_conversion.md).
 
 ## 🛠️ Installation
 To install using pip:
