@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+WAIT_PID=${1:?usage: finalize_after_openeqa.sh OPEN_EQA_QUEUE_PID [STALE_WRAPPER_PID]}
+STALE_WRAPPER_PID=${2:-}
+TOOL_ROOT=/mnt/workspace/stage1/scripts/benchmark-tool
+CLI=${TOOL_ROOT}/cli.py
+QUEUE=${TOOL_ROOT}/run_official_eval_queue.sh
+VALIDATOR=${TOOL_ROOT}/validate_stage1_results.py
+REPORTER=${TOOL_ROOT}/generate_stage1_report.py
+DATASET=/tmp/stage1-official-prepared/flickr30k/eval.jsonl
+BASELINE_WEIGHTS=/mnt/luojunkun/stage1/model
+LOG=/mnt/workspace/finalize-after-openeqa-gpu0.log
+
+if [[ -d /usr/local/PPU_SDK/lib ]]; then
+    export LD_LIBRARY_PATH="/opt/accl-p:/usr/local/PPU_SDK/CUDA_SDK/lib64:/usr/local/PPU_SDK/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+fi
+
+timestamp() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+while kill -0 "${WAIT_PID}" 2>/dev/null; do
+    wait_state=$(ps -o stat= -p "${WAIT_PID}" 2>/dev/null | tr -d ' ')
+    if [[ "${wait_state}" == Z* ]]; then
+        break
+    fi
+    sleep 60
+done
+
+if [[ -n "${STALE_WRAPPER_PID}" && -r "/proc/${STALE_WRAPPER_PID}/cmdline" ]] && \
+        tr '\0' ' ' < "/proc/${STALE_WRAPPER_PID}/cmdline" | grep -q 'retry_remaining_stable.sh'; then
+    kill -KILL "${STALE_WRAPPER_PID}"
+fi
+
+run_smoke() {
+    local batch_size=$1
+    local max_batched_grid_area=${2:-}
+    local smoke_limit=${3:-256}
+    local batched_image_grids=${4:-}
+    local image_grid_fallback=${5:-}
+    local output_dir=/tmp/flickr30k-grouped-smoke-b${batch_size}
+    local smoke_log=/mnt/workspace/flickr30k-grouped-smoke-b${batch_size}.log
+    local command=(
+        python "${CLI}" eval-custom
+        --val-dataset "${DATASET}" \
+        --model-weights "${BASELINE_WEIGHTS}" \
+        --model_type qwen3_vl \
+        --model-name baseline-smoke \
+        --dataset-name flickr30k-smoke \
+        --task description \
+        --output-dir "${output_dir}" \
+        --batch-size "${batch_size}" \
+        --max-new-tokens 64 \
+        --limit "${smoke_limit}" \
+        --dtype bfloat16 \
+        --device cuda:0 \
+        --attn-implementation flash_attention_2 \
+        --max-image-pixels 524288 \
+        --group-image-batches \
+        --progress-every 100 \
+        --continue-on-error \
+        --overwrite
+    )
+    if [[ -n "${max_batched_grid_area}" ]]; then
+        command+=(--max-batched-image-grid-area "${max_batched_grid_area}")
+    fi
+    if [[ -n "${batched_image_grids}" ]]; then
+        command+=(--batched-image-grids "${batched_image_grids}")
+    fi
+    if [[ -n "${image_grid_fallback}" ]]; then
+        command+=(--image-grid-fallback "${image_grid_fallback}")
+    fi
+    printf '[%s] smoke: flickr30k batch=%s grouped=1 max_grid_area=%s limit=%s grids=%s fallback=%s\n' \
+        "$(timestamp)" "${batch_size}" "${max_batched_grid_area:-none}" "${smoke_limit}" \
+        "${batched_image_grids:-all}" "${image_grid_fallback:-none}" >> "${LOG}"
+    CUDA_VISIBLE_DEVICES=0 "${command[@]}" > "${smoke_log}" 2>&1
+    local smoke_exit=$?
+    if (( smoke_exit != 0 )); then
+        printf '[%s] smoke failed: batch=%s exit=%s\n' \
+            "$(timestamp)" "${batch_size}" "${smoke_exit}" >> "${LOG}"
+        return 1
+    fi
+    jq -e \
+        --argjson expected "${smoke_limit}" \
+        '.status == "complete" and .processed_samples == $expected and ([.scores[].failed_samples] | add) == 0' \
+        "${output_dir}/scores.json" >/dev/null
+}
+
+FLICKR_BATCH_SIZE=1
+FLICKR_GROUP_IMAGE_BATCHES=0
+FLICKR_MAX_BATCHED_IMAGE_GRID_AREA=
+FLICKR_BATCHED_IMAGE_GRIDS=
+FLICKR_IMAGE_GRID_FALLBACK=
+SAFE_FLICKR_GRIDS=18x32,20x32,22x32,24x32,32x20,32x22,32x24
+SAFE_FLICKR_FALLBACK=24x32
+if run_smoke 8 768 4096 "${SAFE_FLICKR_GRIDS}" "${SAFE_FLICKR_FALLBACK}"; then
+    FLICKR_BATCH_SIZE=8
+    FLICKR_GROUP_IMAGE_BATCHES=1
+    FLICKR_MAX_BATCHED_IMAGE_GRID_AREA=768
+    FLICKR_BATCHED_IMAGE_GRIDS=${SAFE_FLICKR_GRIDS}
+    FLICKR_IMAGE_GRID_FALLBACK=${SAFE_FLICKR_FALLBACK}
+fi
+
+printf '[%s] starting flickr30k: batch=%s grouped=%s\n' \
+    "$(timestamp)" "${FLICKR_BATCH_SIZE}" "${FLICKR_GROUP_IMAGE_BATCHES}" >> "${LOG}"
+EVAL_CUDA_VISIBLE_DEVICES=0 \
+    PREPARED_ROOT_OVERRIDE=/tmp/stage1-official-prepared \
+    SKIP_PREPARE=1 \
+    FLICKR30K_BATCH_SIZE="${FLICKR_BATCH_SIZE}" \
+    FLICKR30K_GROUP_IMAGE_BATCHES="${FLICKR_GROUP_IMAGE_BATCHES}" \
+    FLICKR30K_BATCHED_IMAGE_GRIDS="${FLICKR_BATCHED_IMAGE_GRIDS}" \
+    FLICKR30K_IMAGE_GRID_FALLBACK="${FLICKR_IMAGE_GRID_FALLBACK}" \
+    FLICKR30K_MAX_BATCHED_IMAGE_GRID_AREA="${FLICKR_MAX_BATCHED_IMAGE_GRID_AREA}" \
+    bash "${QUEUE}" flickr30k >> "${LOG}" 2>&1
+
+printf '[%s] validating all official results\n' "$(timestamp)" >> "${LOG}"
+if python "${VALIDATOR}" >> "${LOG}" 2>&1; then
+    python "${REPORTER}" >> "${LOG}" 2>&1
+    printf '[%s] validation and report generation complete\n' "$(timestamp)" >> "${LOG}"
+else
+    printf '[%s] strict validation failed; report generation skipped\n' "$(timestamp)" >> "${LOG}"
+    exit 1
+fi

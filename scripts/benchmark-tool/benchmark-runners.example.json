@@ -1,0 +1,82 @@
+{
+  "defaults": {
+    "timeout": 86400
+  },
+  "benchmarks": {
+    "flickr30k": {
+      "root": "/path/to/Flickr30k-official-repo",
+      "command": [
+        "{python}",
+        "OFFICIAL_EVAL_ENTRY.py",
+        "--model-path",
+        "{model_path}",
+        "--output-file",
+        "{run_dir}/official_result.json"
+      ],
+      "result": {
+        "file": "{run_dir}/official_result.json",
+        "format": "json",
+        "metrics": {
+          "recall_at_1": "/metrics/Recall@1",
+          "recall_at_5": "/metrics/Recall@5",
+          "recall_at_10": "/metrics/Recall@10"
+        }
+      }
+    },
+    "openeqa": {
+      "root": "/path/to/open-eqa-official-repo",
+      "command": [
+        "{python}",
+        "OFFICIAL_EVAL_ENTRY.py",
+        "--model-path",
+        "{model_path}",
+        "--output-file",
+        "{run_dir}/official_result.json"
+      ],
+      "result": {
+        "file": "{run_dir}/official_result.json",
+        "format": "json",
+        "metrics": {
+          "llm_judge": "/metrics/llm_match"
+        }
+      }
+    },
+    "egoplan_bench": {
+      "root": "/path/to/EgoPlan-Bench-official-repo",
+      "command": [
+        "{python}",
+        "OFFICIAL_EVAL_ENTRY.py",
+        "--model-path",
+        "{model_path}",
+        "--output-file",
+        "{run_dir}/official_result.json"
+      ],
+      "result": {
+        "file": "{run_dir}/official_result.json",
+        "format": "json",
+        "metrics": {
+          "accuracy": "/metrics/accuracy"
+        }
+      }
+    },
+    "robospatial": {
+      "root": "/path/to/RoboSpatial-official-repo",
+      "command": [
+        "{python}",
+        "OFFICIAL_EVAL_ENTRY.py",
+        "--model-path",
+        "{model_path}",
+        "--output-file",
+        "{run_dir}/official_result.json"
+      ],
+      "result": {
+        "file": "{run_dir}/official_result.json",
+        "format": "json",
+        "metrics": {
+          "accuracy": "/metrics/accuracy",
+          "iou": "/metrics/iou"
+        }
+      }
+    }
+  }
+}

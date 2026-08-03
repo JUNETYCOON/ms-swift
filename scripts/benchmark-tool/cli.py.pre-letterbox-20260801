@@ -1,0 +1,480 @@
+import argparse
+import json
+import shlex
+import sys
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+try:
+    from .benchmark_metrics import score_custom_file
+    from .benchmark_runner import (BenchmarkRunError, load_runner_config, parse_model_specs, prepare_run,
+                                   run_prepared)
+    from .custom_eval import EvalConfig, run_custom_eval
+    from .grounding import score_grounding
+    from .loader import aggregate_records, discover_result_files, load_records
+    from .records import EvaluationRecord
+    from .registry import (BENCHMARKS, canonical_benchmark_name, get_benchmark, metric_spec_for, parse_names,
+                           resolve_metrics)
+    from .visualizer import plot_grouped_bars, write_summary_csv
+except ImportError:
+    from benchmark_metrics import score_custom_file
+    from benchmark_runner import BenchmarkRunError, load_runner_config, parse_model_specs, prepare_run, run_prepared
+    from custom_eval import EvalConfig, run_custom_eval
+    from grounding import score_grounding
+    from loader import aggregate_records, discover_result_files, load_records
+    from records import EvaluationRecord
+    from registry import (BENCHMARKS, canonical_benchmark_name, get_benchmark, metric_spec_for, parse_names,
+                          resolve_metrics)
+    from visualizer import plot_grouped_bars, write_summary_csv
+
+
+def _add_chart_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--output-name', default='comparison.png', help='Chart file name.')
+    parser.add_argument('--table-name', default='summary.csv', help='Normalized metric table file name.')
+    parser.add_argument('--title', default='VLM evaluation comparison', help='Chart title.')
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='vlm-eval', description='Run, score and visualize official or custom VLM evaluations.')
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    run = subparsers.add_parser('run', help='Run official benchmark interfaces with trained model weights.')
+    run.add_argument(
+        '--model',
+        nargs='+',
+        action='append',
+        required=True,
+        help='Trained weight as NAME=PATH or PATH. Repeat the option or pass multiple values.')
+    run.add_argument(
+        '--benchmark', nargs='+', required=True, help='Benchmark names, comma-separated or space-separated.')
+    run.add_argument(
+        '--runner-config', help='JSON config for external official benchmark commands and result selectors.')
+    run.add_argument(
+        '--base-model', help='Optional base model used when each --model value is an ms-swift adapter checkpoint.')
+    run.add_argument(
+        '--output-dir', default='vlm_eval_results', help='Directory for official outputs, logs, scores and chart.')
+    run.add_argument(
+        '--infer-backend',
+        default='transformers',
+        choices=('transformers', 'vllm', 'sglang', 'lmdeploy'),
+        help='ms-swift inference backend for built-in VLMEvalKit benchmarks.')
+    run.add_argument('--eval-limit', type=int, help='Optional sample limit for ms-swift VLMEvalKit benchmarks.')
+    run.add_argument('--eval-num-proc', type=int, default=16, help='Concurrent evaluator clients for ms-swift.')
+    run.add_argument('--eval-generation-config', help='JSON object passed to ms-swift evaluation generation config.')
+    run.add_argument('--timeout', type=float, help='Default timeout in seconds for each benchmark process.')
+    run.add_argument(
+        '--continue-on-error', action='store_true', help='Continue remaining model/benchmark runs after a failure.')
+    run.add_argument('--dry-run', action='store_true', help='Validate and print commands without running them.')
+    run.add_argument('--no-visual', action='store_true', help='Write scores without generating a comparison chart.')
+    _add_chart_options(run)
+
+    visual = subparsers.add_parser('visual', help='Generate metric comparison bar charts from result files.')
+    visual.add_argument('--model', nargs='+', required=True, help='Model names, comma-separated or space-separated.')
+    visual.add_argument(
+        '--benchmark', nargs='+', required=True, help='Benchmark names, comma-separated or space-separated.')
+    visual.add_argument('--metric', nargs='+', help='Metric names. Defaults to each benchmark default metrics.')
+    visual.add_argument(
+        '--results-dir',
+        default='vlm_eval_results',
+        help='Directory scanned recursively for .json, .jsonl and .csv result files.')
+    visual.add_argument(
+        '--result-file', action='append', default=[], help='Explicit result file. Can be passed multiple times.')
+    visual.add_argument('--output-dir', default='vlm_eval_outputs', help='Directory for chart and summary table.')
+    visual.add_argument(
+        '--strict-metrics', action='store_true', help='Fail when a requested metric is not registered anywhere.')
+    _add_chart_options(visual)
+
+    score = subparsers.add_parser('score-custom', help='Score a custom prediction file with ms-swift text metrics.')
+    score.add_argument('--model', required=True, help='Model name.')
+    score.add_argument('--dataset', required=True, help='Custom dataset or split name, for example val.')
+    score.add_argument('--input-file', required=True, help='Prediction records in JSON, JSONL or CSV format.')
+    score.add_argument('--metric', nargs='+', default=['acc'], help='Custom metrics: acc, rouge or nlg.')
+    score.add_argument(
+        '--output-file',
+        default='vlm_eval_results/custom_scores.csv',
+        help='Standardized CSV output file for `visual --result-file`.')
+
+    grounding = subparsers.add_parser('score-grounding', help='Score a custom grounding dataset with IoU.')
+    grounding.add_argument('--model', required=True, help='Model name.')
+    grounding.add_argument('--dataset', required=True, help='Custom dataset or split name, for example val.')
+    grounding.add_argument('--prediction-file', required=True, help='Prediction file in JSON, JSONL or CSV format.')
+    grounding.add_argument('--annotation-file', required=True, help='Annotation file in JSON, JSONL or CSV format.')
+    grounding.add_argument('--iou-threshold', type=float, default=0.5, help='IoU accuracy threshold.')
+    grounding.add_argument(
+        '--output-file',
+        default='vlm_eval_results/grounding_scores.csv',
+        help='Standardized CSV output file for `visual --result-file`.')
+
+    custom_eval = subparsers.add_parser(
+        'eval-custom', help='Run custom VQA/description/grounding/grounded val data with Transformers.')
+    custom_eval.add_argument('--val-dataset', required=True, help='Val data in JSONL, JSON or CSV format.')
+    custom_eval.add_argument('--model-weights', required=True, help='Full model checkpoint or LoRA adapter path.')
+    custom_eval.add_argument('--base-model', help='Base model path when --model-weights is a LoRA adapter.')
+    custom_eval.add_argument('--output-dir', required=True, help='Output directory for predictions and scores.')
+    custom_eval.add_argument('--model-name', help='Display name. Defaults to the weight directory name.')
+    custom_eval.add_argument(
+        '--model-type',
+        '--model_type',
+        dest='model_type',
+        help='Expected Hugging Face model_type, for example qwen3_vl. Validated against config.json.')
+    custom_eval.add_argument('--dataset-name', help='Display name. Defaults to the val filename stem.')
+    custom_eval.add_argument('--task', choices=('auto', 'vqa', 'description', 'grounding', 'grounded'), default='auto')
+    custom_eval.add_argument('--batch-size', type=int, default=1, help='Generation batch size.')
+    custom_eval.add_argument(
+        '--max-new-tokens', type=int, default=128,
+        help='Maximum generated tokens per sample. Use 16-32 for short-answer VQA and 128+ for descriptions.')
+    custom_eval.add_argument('--limit', type=int, help='Evaluate only the first N records.')
+    custom_eval.add_argument('--dtype', choices=('auto', 'float32', 'float16', 'bfloat16'), default='auto')
+    custom_eval.add_argument('--device', default='auto', help='Device such as auto, cuda, cuda:0 or cpu.')
+    custom_eval.add_argument(
+        '--attn-implementation',
+        choices=('auto', 'sdpa', 'eager', 'flash_attention_2'),
+        default='sdpa',
+        help='Transformers attention backend. Use eager if the installed CUDA Flash SDP kernel is unstable.')
+    custom_eval.add_argument(
+        '--max-image-pixels',
+        type=int,
+        help='Cap pixels per image before vision encoding. Try 262144 or 131072 for faster evaluation.')
+    custom_eval.add_argument(
+        '--min-video-frames',
+        type=int,
+        help='Set the minimum sampled video frames, padding very short videos when needed.')
+    custom_eval.add_argument(
+        '--max-video-frames',
+        type=int,
+        help='Cap frames sampled from each video. Try 32 or 64 for faster video evaluation.')
+    custom_eval.add_argument(
+        '--video-backend',
+        choices=('auto', 'decord', 'opencv', 'pyav', 'torchvision', 'torchcodec'),
+        default='auto',
+        help='Video decoder backend. Decord supports efficient random frame access for long videos.')
+    custom_eval.add_argument(
+        '--allow-empty-video-fallback', action='store_true',
+        help='Use two black frames for tiny local video files with no decodable stream.')
+    custom_eval.add_argument(
+        '--group-image-batches', action='store_true',
+        help='Batch images only when their processed spatial grids match.')
+    custom_eval.add_argument(
+        '--batched-image-grids',
+        help='Comma-separated HEIGHTxWIDTH allowlist; other image grids run as singleton batches.')
+    custom_eval.add_argument(
+        '--max-batched-image-grid-area', type=int,
+        help='Run matching image grids above this patch-grid area as singleton batches.')
+    custom_eval.add_argument(
+        '--group-video-batches', action='store_true',
+        help='Batch videos only when their processed temporal/spatial grids match.')
+    custom_eval.add_argument(
+        '--min-video-batch-size', type=int, default=1,
+        help='Duplicate padding entries for homogeneous video batches smaller than this value.')
+    custom_eval.add_argument('--iou-threshold', type=float, default=0.5)
+    custom_eval.add_argument(
+        '--prediction-space',
+        choices=('norm1000', 'norm1', 'real'),
+        default='norm1000',
+        help='Coordinate space used by generated grounding boxes. Qwen-VL training normally uses norm1000.')
+    custom_eval.add_argument('--progress-every', type=int, default=10)
+    custom_eval.add_argument('--trust-remote-code', action='store_true')
+    custom_eval.add_argument('--continue-on-error', action='store_true')
+    custom_eval.add_argument('--resume', action='store_true', help='Append to a partial run and skip completed dataset rows.')
+    custom_eval.add_argument(
+        '--retry-errors', action='store_true',
+        help='With --resume, remove prior failed rows and run those dataset rows again.')
+    custom_eval.add_argument('--overwrite', action='store_true')
+
+    listing = subparsers.add_parser('list-benchmarks', help='List registered benchmarks and official metrics.')
+    listing.add_argument('--details', action='store_true', help='Also show task, output, backend and reference.')
+    return parser
+
+
+def _percentage_metrics(benchmarks: Sequence[str], metrics: Sequence[str]) -> List[str]:
+    percentage = []
+    for benchmark in benchmarks:
+        for metric in metrics:
+            spec = metric_spec_for(benchmark, metric)
+            if spec and spec.percentage:
+                percentage.append(spec.name)
+    return list(dict.fromkeys(percentage))
+
+
+def _validate_metrics(benchmarks: Sequence[str], metrics: Sequence[str], strict: bool) -> None:
+    for metric in metrics:
+        if any(metric_spec_for(benchmark, metric) is not None for benchmark in benchmarks):
+            continue
+        message = f'Metric `{metric}` is not registered for any selected benchmark.'
+        if strict:
+            raise ValueError(message)
+        print(f'warning: {message}', file=sys.stderr)
+
+
+def _write_outputs(records: Sequence[EvaluationRecord], models: Sequence[str], benchmarks: Sequence[str],
+                   metrics: Sequence[str], output_dir: Path, table_name: str, output_name: str, title: str,
+                   draw_chart: bool = True) -> None:
+    table_path = output_dir / table_name
+    write_summary_csv(records, metrics, table_path)
+    print(f'Wrote summary table: {table_path}')
+    if draw_chart:
+        chart_path = plot_grouped_bars(records, models, benchmarks, metrics, output_dir / output_name, title=title)
+        print(f'Wrote comparison chart: {chart_path}')
+
+
+def _metrics_in_records(records: Sequence[EvaluationRecord], benchmarks: Sequence[str]) -> List[str]:
+    available = {metric for record in records for metric in record.metrics}
+    metrics: List[str] = []
+    for benchmark in benchmarks:
+        for metric in get_benchmark(benchmark).metrics:
+            if metric in available and metric not in metrics:
+                metrics.append(metric)
+    for metric in sorted(available):
+        if metric not in metrics:
+            metrics.append(metric)
+    return metrics
+
+
+def _run_official(args: argparse.Namespace) -> int:
+    raw_models = [value for group in args.model for value in group]
+    models = parse_model_specs(raw_models)
+    benchmarks = [canonical_benchmark_name(name) for name in parse_names(args.benchmark)]
+    if not benchmarks:
+        raise ValueError('At least one benchmark is required.')
+    if args.eval_generation_config:
+        value = json.loads(args.eval_generation_config)
+        if not isinstance(value, dict):
+            raise ValueError('--eval-generation-config must be a JSON object.')
+
+    config = load_runner_config(Path(args.runner_config) if args.runner_config else None)
+    output_dir = Path(args.output_dir)
+    prepared_runs = [
+        prepare_run(
+            model=model,
+            benchmark_name=benchmark,
+            config=config,
+            output_dir=output_dir,
+            base_model=args.base_model,
+            infer_backend=args.infer_backend,
+            eval_limit=args.eval_limit,
+            eval_num_proc=args.eval_num_proc,
+            eval_generation_config=args.eval_generation_config,
+            timeout=args.timeout) for model in models for benchmark in benchmarks
+    ]
+
+    if args.dry_run:
+        for prepared in prepared_runs:
+            if not prepared.work_dir.is_dir():
+                raise ValueError(
+                    f'Benchmark working directory does not exist for `{prepared.benchmark.display_name}`: '
+                    f'{prepared.work_dir}.')
+            print(f'[{prepared.model.name} / {prepared.benchmark.display_name}]')
+            print(f'cwd: {prepared.work_dir}')
+            print(f'command: {shlex.join(prepared.command)}')
+            print(f'official result: {prepared.result_pattern}')
+        return 0
+
+    records: List[EvaluationRecord] = []
+    failures = []
+    for prepared in prepared_runs:
+        print(f'Running {prepared.benchmark.display_name} for model {prepared.model.name}...')
+        try:
+            record = run_prepared(prepared)
+        except (BenchmarkRunError, ValueError) as e:
+            if not args.continue_on_error:
+                raise BenchmarkRunError(str(e)) from e
+            failures.append(f'{prepared.model.name}/{prepared.benchmark.name}: {e}')
+            print(f'error: {failures[-1]}', file=sys.stderr)
+            continue
+        if record is not None:
+            records.append(record)
+            values = ', '.join(f'{metric}={value:.6g}' for metric, value in record.metrics.items())
+            print(f'Collected official metrics: {values}')
+
+    if not records:
+        raise BenchmarkRunError('No official benchmark scores were produced.')
+    metrics = _metrics_in_records(records, benchmarks)
+    _write_outputs(
+        records,
+        [model.name for model in models],
+        benchmarks,
+        metrics,
+        output_dir,
+        args.table_name,
+        args.output_name,
+        args.title,
+        draw_chart=not args.no_visual)
+    return 1 if failures else 0
+
+
+def _run_visual(args: argparse.Namespace) -> int:
+    models = parse_names(args.model)
+    benchmarks = [canonical_benchmark_name(name) for name in parse_names(args.benchmark)]
+    if not models:
+        raise ValueError('At least one model is required.')
+    if not benchmarks:
+        raise ValueError('At least one benchmark is required.')
+
+    metrics = resolve_metrics(benchmarks, args.metric)
+    _validate_metrics(benchmarks, metrics, args.strict_metrics)
+    result_files = [Path(path) for path in args.result_file]
+    result_files.extend(discover_result_files(Path(args.results_dir)))
+    result_files = sorted(set(result_files))
+    if not result_files:
+        print(
+            'No result files found. Pass --result-file or put .json/.jsonl/.csv files under '
+            f'`{args.results_dir}`.',
+            file=sys.stderr)
+        return 1
+
+    records = load_records(result_files, models, benchmarks, _percentage_metrics(benchmarks, metrics))
+    records = aggregate_records(records, models, benchmarks)
+    if not records:
+        print('No matching records found for the requested models and benchmarks.', file=sys.stderr)
+        return 1
+    _write_outputs(
+        records,
+        models,
+        benchmarks,
+        metrics,
+        Path(args.output_dir),
+        args.table_name,
+        args.output_name,
+        args.title)
+    print(f'Loaded {len(result_files)} result file(s).')
+    return 0
+
+
+def _run_list_benchmarks(args: argparse.Namespace) -> int:
+    for spec in BENCHMARKS.values():
+        metrics = ', '.join(spec.metrics)
+        backend = 'ms-swift/VLMEvalKit' if spec.backend == 'ms_swift_vlmevalkit' else 'external official runner'
+        print(f'{spec.display_name} [{spec.name}]: {metrics}')
+        if args.details:
+            print(f'  task: {spec.task}')
+            print(f'  output: {spec.output}')
+            print(f'  backend: {backend}')
+            print(f'  reference: {spec.reference}')
+    print('custom dataset: acc, rouge_1, rouge_2, rouge_l, bleu_4, mean_iou, acc_iou_0_5')
+    return 0
+
+
+def _run_score_grounding(args: argparse.Namespace) -> int:
+    metrics = score_grounding(
+        prediction_file=Path(args.prediction_file),
+        annotation_file=Path(args.annotation_file),
+        model=args.model,
+        dataset=args.dataset,
+        output_file=Path(args.output_file),
+        iou_threshold=args.iou_threshold)
+    print(f'Wrote custom grounding scores: {args.output_file}')
+    print(', '.join(f'{key}={value:.6g}' for key, value in metrics.items()))
+    return 0
+
+
+def _run_score_custom(args: argparse.Namespace) -> int:
+    metrics = resolve_metrics([args.dataset], args.metric)
+    scores = score_custom_file(
+        dataset=args.dataset,
+        model=args.model,
+        input_file=Path(args.input_file),
+        output_file=Path(args.output_file),
+        metrics=metrics)
+    print(f'Wrote custom dataset scores: {args.output_file}')
+    print(', '.join(f'{key}={value:.6g}' for key, value in scores.items()))
+    return 0
+
+
+def _run_custom_eval(args: argparse.Namespace) -> int:
+    weights = Path(args.model_weights)
+    dataset = Path(args.val_dataset)
+    config = EvalConfig(
+        val_dataset=dataset,
+        model_weights=weights,
+        base_model=Path(args.base_model) if args.base_model else None,
+        output_dir=Path(args.output_dir),
+        model_name=args.model_name or weights.name,
+        dataset_name=args.dataset_name or dataset.stem,
+        model_type=args.model_type,
+        task=args.task,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        limit=args.limit,
+        dtype=args.dtype,
+        device=args.device,
+        attn_implementation=args.attn_implementation,
+        max_image_pixels=args.max_image_pixels,
+        min_video_frames=args.min_video_frames,
+        max_video_frames=args.max_video_frames,
+        video_backend=args.video_backend,
+        allow_empty_video_fallback=args.allow_empty_video_fallback,
+        group_image_batches=args.group_image_batches,
+        batched_image_grids=_parse_image_grids(args.batched_image_grids),
+        max_batched_image_grid_area=args.max_batched_image_grid_area,
+        group_video_batches=args.group_video_batches,
+        min_video_batch_size=args.min_video_batch_size,
+        iou_threshold=args.iou_threshold,
+        prediction_space=args.prediction_space,
+        trust_remote_code=args.trust_remote_code,
+        progress_every=args.progress_every,
+        continue_on_error=args.continue_on_error,
+        resume=args.resume,
+        retry_errors=args.retry_errors,
+        overwrite=args.overwrite)
+    rows = run_custom_eval(config)
+    for row in rows:
+        values = ', '.join(f'{key}={value:.6g}' if isinstance(value, float) else f'{key}={value}'
+                           for key, value in row.items() if value != '')
+        print(values)
+    print(f'Wrote custom evaluation outputs: {config.output_dir}')
+    return 0
+
+
+def _parse_image_grids(value: Optional[str]) -> Optional[Tuple[Tuple[int, int], ...]]:
+    if value is None:
+        return None
+    grids = []
+    for item in value.split(','):
+        dimensions = item.strip().lower().split('x')
+        if len(dimensions) != 2:
+            raise ValueError('--batched-image-grids entries must use HEIGHTxWIDTH format.')
+        try:
+            grid = (int(dimensions[0]), int(dimensions[1]))
+        except ValueError as error:
+            raise ValueError('--batched-image-grids entries must use integer HEIGHTxWIDTH values.') from error
+        if grid[0] <= 0 or grid[1] <= 0:
+            raise ValueError('--batched-image-grids dimensions must be greater than zero.')
+        if grid not in grids:
+            grids.append(grid)
+    if not grids:
+        raise ValueError('--batched-image-grids requires at least one grid.')
+    return tuple(grids)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'run':
+            return _run_official(args)
+        if args.command == 'visual':
+            return _run_visual(args)
+        if args.command == 'score-custom':
+            return _run_score_custom(args)
+        if args.command == 'score-grounding':
+            return _run_score_grounding(args)
+        if args.command == 'eval-custom':
+            return _run_custom_eval(args)
+        if args.command == 'list-benchmarks':
+            return _run_list_benchmarks(args)
+    except json.JSONDecodeError as e:
+        parser.error(f'Invalid JSON: {e}')
+    except ValueError as e:
+        parser.error(str(e))
+    except BenchmarkRunError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
