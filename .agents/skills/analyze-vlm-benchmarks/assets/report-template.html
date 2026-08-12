@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root{color-scheme:light;--ink:#202428;--muted:#657078;--line:#d7dadd;--paper:#fff;--page:#f4f5f3;--green:#17643b;--green-bg:#e9f4ed;--red:#963128;--red-bg:#faece9;--blue:#245a82;--blue-bg:#eaf2f8;--amber:#7b5917;--amber-bg:#fbf2db;--violet:#65517c;--violet-bg:#f0ebf5}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;letter-spacing:0}a{color:var(--blue);text-underline-offset:2px}
+.page-head,main,footer{width:min(1480px,calc(100% - 32px));margin:auto}.page-head{padding:26px 0 18px}.breadcrumbs{margin-bottom:9px;color:var(--muted);font-size:12px}.breadcrumbs a{color:inherit}h1{margin:0 0 7px;font-size:28px;line-height:1.2;letter-spacing:0}h2{margin:0 0 13px;font-size:19px;letter-spacing:0}h3{margin:0;font-size:16px;letter-spacing:0}p{margin:6px 0}.subtitle,.muted,figcaption{color:var(--muted)}
+.status-band{border-block:1px solid var(--line);background:var(--paper)}.status-inner{width:min(1480px,calc(100% - 32px));margin:auto;padding:12px 0}.status-note{padding:10px 12px;border-left:4px solid var(--blue);background:var(--blue-bg)}.status-note.warning{border-color:var(--amber);background:var(--amber-bg)}
+.summary-band{border-bottom:1px solid var(--line);background:var(--paper)}.summary-inner{width:min(1480px,calc(100% - 32px));margin:auto;padding:18px 0 22px}.metrics{display:grid;grid-template-columns:repeat(7,minmax(128px,1fr));gap:1px;border:1px solid var(--line);background:var(--line)}.metric{min-height:88px;padding:13px;background:var(--paper);min-width:0}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:4px;font-size:21px;overflow-wrap:anywhere}.metric small{display:block;color:var(--muted);overflow-wrap:anywhere}
+.detail-grid{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(540px,1.5fr);gap:24px;margin-top:22px}.detail-grid>section{min-width:0}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;background:var(--paper)}th,td{padding:8px 10px;border:1px solid var(--line);text-align:left;overflow-wrap:anywhere}thead th{background:#eef0f1}.provenance{margin-top:15px;padding:11px 13px;border-left:4px solid var(--blue);background:var(--blue-bg);overflow-wrap:anywhere}.provenance.warning{border-color:var(--amber);background:var(--amber-bg)}
+.toolbar{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:24px 0 14px;padding:12px;border:1px solid var(--line);background:rgba(255,255,255,.97);box-shadow:0 2px 8px rgba(20,24,28,.08)}.control{display:grid;gap:4px;min-width:150px}.control.search{flex:1;min-width:240px}label{color:var(--muted);font-size:12px}input,select{width:100%;min-height:36px;padding:6px 9px;border:1px solid #b9bec2;border-radius:4px;background:#fff;color:var(--ink)}.shown{margin-left:auto;min-width:105px;padding-bottom:7px;font-variant-numeric:tabular-nums}
+.sample-list{display:grid;gap:16px;padding-bottom:34px}.sample{overflow:hidden;border:1px solid var(--line);border-radius:6px;background:var(--paper)}.sample[hidden]{display:none}.sample-header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);background:#f0f2f2}.sample-index{display:inline-block;width:50px;color:var(--muted);font-variant-numeric:tabular-nums}.tags{display:flex;flex-wrap:wrap;gap:5px}.tag,.status{display:inline-flex;align-items:center;min-height:24px;padding:2px 8px;border:1px solid #c7ccd0;border-radius:4px;background:#f7f8f8;font-size:12px}.outcome-ours_only,.outcome-ours_improved,.status.correct{color:var(--green);border-color:#9cc9aa;background:var(--green-bg)}.outcome-baseline_only,.outcome-baseline_improved,.status.wrong{color:var(--red);border-color:#dfaaa4;background:var(--red-bg)}.outcome-both_wrong,.outcome-tied_low{color:var(--amber);border-color:#dec582;background:var(--amber-bg)}.outcome-both_correct,.outcome-tied_high{color:var(--blue);border-color:#a8c6da;background:var(--blue-bg)}
+.sample-context{padding:14px;border-bottom:1px solid var(--line)}figure{margin:0 0 14px}.primary-media,.primary-video{display:block;width:100%;height:auto;max-height:620px;object-fit:contain;border:1px solid var(--line);background:#16191d}.primary-video{margin-top:12px;aspect-ratio:16/9}figcaption{margin-top:5px;font-size:12px}.video-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:6px 0 14px;color:var(--muted);font-size:12px}.video-actions>span:last-child{margin-left:auto}.inline-video-play{display:inline-flex;align-items:center;min-height:34px;padding:6px 10px;border:1px solid var(--blue);border-radius:4px;background:#fff;color:var(--blue);cursor:pointer;font:inherit;font-weight:650;letter-spacing:0}.inline-video-play:hover{background:var(--blue-bg)}.inline-video-status.error{color:var(--red);font-weight:650}.media-warning{margin:8px 0;padding:9px;border:1px solid #dfaaa4;background:var(--red-bg);color:var(--red)}.question p,.references{white-space:pre-wrap;overflow-wrap:anywhere}.field-label{margin:10px 0 4px;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase}.options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 18px;margin:8px 0;padding:0;list-style:none}.references{padding-top:7px;border-top:1px dashed var(--line)}
+.comparison{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.model-output{min-width:0;padding:14px}.model-output+.model-output{border-left:1px solid var(--line)}.model-output.correct,.model-output.improved{box-shadow:inset 4px 0 var(--green)}.model-output.wrong,.model-output.regressed{box-shadow:inset 4px 0 var(--red)}.model-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.compact-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}.compact-meta div{min-width:0}.compact-meta dt{color:var(--muted);font-size:12px}.compact-meta dd{margin:1px 0 0;font-weight:600;overflow-wrap:anywhere}.model-preview{display:block;width:100%;height:auto;max-height:420px;object-fit:contain;margin:10px 0;border:1px solid var(--line);background:#16191d}pre{min-height:54px;max-height:300px;overflow:auto;margin:0;padding:10px;border:1px solid var(--line);border-radius:4px;background:#f8f9f9;color:#24292e;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.raw-json-panel{margin-top:12px}.raw-json-panel>summary{cursor:pointer;color:var(--blue);font-weight:650}.raw-json{max-height:420px;margin-top:7px}.diagnostic{margin-top:9px;color:var(--muted);font-size:12px}.diagnostic b{color:var(--ink)}
+footer{padding:0 0 30px;color:var(--muted)}
+@media(max-width:980px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.detail-grid{grid-template-columns:minmax(0,1fr)}.comparison{grid-template-columns:1fr}.model-output+.model-output{border-left:0;border-top:1px solid var(--line)}.options{grid-template-columns:1fr}.sample-header{align-items:flex-start;flex-direction:column}.shown{margin-left:0}}
+@media(max-width:520px){.page-head,main,footer,.status-inner,.summary-inner{width:min(100% - 18px,1480px)}h1{font-size:22px}.metrics{grid-template-columns:1fr}.toolbar{position:static}.control,.control.search{width:100%;min-width:0}.compact-meta{grid-template-columns:1fr}.sample-context,.model-output{padding:11px}}
+</style>
+</head>
+<body>
+<header class="page-head">
+  <div class="breadcrumbs"><a href="{{GROUP_INDEX_HREF}}">{{GROUP_LABEL}}</a> / {{DISPLAY_NAME}}</div>
+  <h1>{{DISPLAY_NAME}} 配对评测报告</h1>
+  <p class="subtitle">Baseline 与 Ours | {{SCOPE_SUBTITLE}} | 生成时间 {{GENERATED_AT}}</p>
+</header>
+<section class="status-band"><div class="status-inner">{{STATUS_HTML}}</div></section>
+<section class="summary-band"><div class="summary-inner">
+  {{PRESENTED_RESULT_HTML}}
+</div></section>
+<main>
+  <div class="toolbar">
+    <div class="control search"><label for="search">关键词搜索</label><input id="search" type="search" placeholder="搜索 sample_id、问题、答案、输出或标签"></div>
+    <div class="control"><label for="outcome">配对结果</label><select id="outcome"><option value="">全部结果</option>{{OUTCOME_OPTIONS_HTML}}</select></div>
+    <div class="control"><label for="category">类别</label><select id="category"><option value="">全部类别</option>{{CATEGORY_OPTIONS_HTML}}</select></div>
+    <div class="control"><label for="error">诊断错误</label><select id="error"><option value="">全部错误类型</option>{{ERROR_OPTIONS_HTML}}</select></div>
+    <div class="control"><label for="cohort">抽样类型</label><select id="cohort"><option value="">全部抽样类型</option><option value="representative">代表性抽样</option><option value="targeted_badcase">定向坏例</option></select></div>
+    <div class="control"><label for="media">媒体状态</label><select id="media"><option value="">全部媒体</option><option value="ok">正常</option><option value="missing">缺失</option><option value="decode_failure">解码失败</option><option value="empty_video_fallback">空视频回退</option></select></div>
+    <div class="shown">已显示 <strong id="shown">{{DISPLAYED_COUNT}}</strong> / {{DISPLAYED_COUNT}} 条</div>
+  </div>
+  <!-- Every generated .sample must contain three default-visible pre.raw-json blocks:
+       sample in the common context, baseline_prediction in the Baseline column,
+       and ours_prediction in the Ours column. See references/raw-json-contract.md. -->
+  <div class="sample-list">{{SAMPLES_HTML}}</div>
+</main>
+<footer>{{FOOTER_HTML}}</footer>
+<script>
+const samples=[...document.querySelectorAll('.sample')];
+const controls=['search','outcome','category','error','cohort','media'].map(id=>document.getElementById(id));
+function filterSamples(){
+  const query=document.getElementById('search').value.trim().toLowerCase();
+  const wanted={outcome:document.getElementById('outcome').value,category:document.getElementById('category').value,error:document.getElementById('error').value,cohort:document.getElementById('cohort').value,media:document.getElementById('media').value};
+  let shown=0;
+  for(const sample of samples){
+    const match=(!query||sample.dataset.search.includes(query))&&(!wanted.outcome||sample.dataset.outcome===wanted.outcome)&&(!wanted.category||sample.dataset.category===wanted.category)&&(!wanted.error||sample.dataset.errors.split('|').includes(wanted.error))&&(!wanted.cohort||sample.dataset.cohort===wanted.cohort)&&(!wanted.media||sample.dataset.media===wanted.media);
+    sample.hidden=!match;if(match)shown++;
+  }
+  document.getElementById('shown').textContent=shown;
+}
+controls.forEach(control=>control.addEventListener(control.type==='search'?'input':'change',filterSamples));
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('.inline-video-play');
+  if(!button)return;
+  event.preventDefault();
+  const sample=button.closest('.sample');
+  const video=sample&&sample.querySelector('video');
+  const status=button.parentElement&&button.parentElement.querySelector('.inline-video-status');
+  if(!video){if(status){status.textContent='未找到当前样本的视频播放器';status.className='inline-video-status error'}return}
+  document.querySelectorAll('video').forEach(other=>{if(other!==video)other.pause()});
+  video.preload='auto';video.scrollIntoView({behavior:'smooth',block:'center'});
+  if(status){status.textContent='正在读取本地视频';status.className='inline-video-status'}
+  try{await video.play();if(status)status.textContent='正在本页播放'}
+  catch(error){if(status){status.textContent='播放失败：'+(error&&error.message?error.message:'浏览器不支持该视频');status.className='inline-video-status error'}}
+});
+</script>
+</body>
+</html>

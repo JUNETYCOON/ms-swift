@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import copy
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+
+from universal_dataset.io import iter_jsonl, parse_json_strict, write_jsonl
+from universal_dataset.ms_swift import MsSwiftConversionError, ms_swift_to_record, record_to_ms_swift
+from universal_dataset.profile import profile_path
+from universal_dataset.split import canonical_asset_identity, split_jsonl
+from universal_dataset.validation import MANIFEST_SCHEMA_PATH, SCHEMA_PATH, validate_manifest, validate_record
+
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "representative.jsonl"
+
+
+def example_records():
+    return [record for _, record in iter_jsonl(EXAMPLES)]
+
+
+class UniversalDatasetTest(unittest.TestCase):
+    def test_representative_records_pass_semantic_validation(self):
+        records = example_records()
+        self.assertEqual(len(records), 5)
+        for record in records:
+            with self.subTest(record=record["id"]):
+                self.assertEqual(validate_record(record, check_json_schema=False), [])
+
+    def test_json_schema_when_optional_dependency_is_available(self):
+        try:
+            from jsonschema import Draft202012Validator
+        except ImportError:
+            self.skipTest("optional jsonschema is not installed")
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema)
+        for record in example_records():
+            with self.subTest(record=record["id"]):
+                self.assertEqual(list(validator.iter_errors(record)), [])
+        manifest_schema = json.loads(MANIFEST_SCHEMA_PATH.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(manifest_schema)
+        manifest = json.loads((EXAMPLES.parent / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(Draft202012Validator(manifest_schema).iter_errors(manifest)), [])
+
+    def test_vqa_annotation_exports_to_ms_swift(self):
+        value = record_to_ms_swift(example_records()[0])[0]
+        self.assertEqual(value["images"], ["/datasets/coco/train2017/000000000001.jpg"])
+        self.assertTrue(value["messages"][0]["content"].startswith("<image>"))
+        self.assertEqual(value["messages"][1]["content"], "A red cup.")
+
+    def test_grounding_round_trip_preserves_ms_swift_contract(self):
+        source = record_to_ms_swift(example_records()[1])[0]
+        self.assertEqual(source["messages"][1]["content"].count("<ref-object>"), 2)
+        self.assertEqual(source["messages"][1]["content"].count("<bbox>"), 2)
+        self.assertEqual(source["objects"]["bbox_type"], "real")
+        imported = ms_swift_to_record(source, source_id="roundtrip")
+        self.assertEqual(validate_record(imported, check_json_schema=False), [])
+        exported = record_to_ms_swift(imported)[0]
+        for key in ("messages", "images", "objects"):
+            self.assertEqual(exported[key], source[key])
+
+    def test_non_sft_annotation_fails_instead_of_being_dropped(self):
+        panoptic = example_records()[3]
+        with self.assertRaisesRegex(MsSwiftConversionError, "no implicit ms-swift"):
+            record_to_ms_swift(panoptic)
+
+    def test_multi_annotation_export_has_unique_ids(self):
+        record = copy.deepcopy(example_records()[0])
+        second = copy.deepcopy(record["annotations"][0])
+        second["id"] = "qa:1"
+        second["question"] = "What color is the cup?"
+        record["annotations"].append(second)
+        values = record_to_ms_swift(record)
+        self.assertEqual(len(values), 2)
+        self.assertEqual(len({value["id"] for value in values}), 2)
+        self.assertEqual({value["group_id"] for value in values}, {record["group_id"]})
+
+    def test_multiple_answers_require_canonical_or_explicit_policy(self):
+        record = copy.deepcopy(example_records()[0])
+        del record["annotations"][0]["canonical_answer_index"]
+        with self.assertRaisesRegex(MsSwiftConversionError, "explicit answer policy"):
+            record_to_ms_swift(record)
+        value = record_to_ms_swift(record, answer_policy="highest-count")[0]
+        self.assertEqual(value["messages"][1]["content"], "A red cup.")
+
+    def test_invalid_episode_order_is_reported(self):
+        episode = copy.deepcopy(example_records()[4])
+        episode["episode"]["steps"][1]["index"] = 0
+        issues = validate_record(episode, check_json_schema=False)
+        self.assertIn("order", {issue.code for issue in issues})
+
+    def test_split_keeps_media_group_atomic(self):
+        first = copy.deepcopy(example_records()[0])
+        second = copy.deepcopy(first)
+        second["id"] = "vqa:0002"
+        second["annotations"][0]["id"] = "qa:1"
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "source.jsonl"
+            train = root / "train.jsonl"
+            val = root / "val.jsonl"
+            write_jsonl(source, [first, second])
+            summary = split_jsonl(source, train, val, val_ratio=0.5, seed=42)
+            self.assertEqual(summary.total_records, 2)
+            self.assertIn((summary.train_records, summary.val_records), ((2, 0), (0, 2)))
+            self.assertEqual(summary.leakage_overlap, 0)
+
+    def test_split_merges_shared_asset_with_conflicting_group_ids(self):
+        first = copy.deepcopy(example_records()[0])
+        second = copy.deepcopy(first)
+        second["id"] = "vqa:0002"
+        second["group_id"] = "wrong-group"
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "source.jsonl"
+            write_jsonl(source, [first, second])
+            train = root / "train.jsonl"
+            val = root / "val.jsonl"
+            summary = split_jsonl(source, train, val, val_ratio=0.5)
+            output = [record for _, record in iter_jsonl(train)] + [record for _, record in iter_jsonl(val)]
+            self.assertEqual(summary.total_groups, 2)
+            self.assertEqual(summary.total_components, 1)
+            self.assertEqual(summary.merged_groups, 2)
+            self.assertEqual(summary.rewritten_records, 2)
+            self.assertEqual(len({record["group_id"] for record in output}), 1)
+            self.assertEqual(len({record["split"] for record in output}), 1)
+            self.assertEqual(
+                {record["extensions"]["s1_udf.split"]["source_group_id"] for record in output},
+                {first["group_id"], second["group_id"]},
+            )
+
+    def test_split_uses_transitive_media_components(self):
+        base = copy.deepcopy(example_records()[0])
+        records = []
+        for index, (group_id, uris) in enumerate(
+            (("g1", ["/media/A.jpg", "/media/B.jpg"]), ("g2", ["/media/B.jpg", "/media/C.jpg"]), ("g3", ["/media/C.jpg"]))
+        ):
+            record = copy.deepcopy(base)
+            record["id"] = "row:{}".format(index)
+            record["group_id"] = group_id
+            record["assets"] = [
+                {"id": "image:{}".format(asset_index), "kind": "image", "uri": uri}
+                for asset_index, uri in enumerate(uris)
+            ]
+            record["annotations"][0]["target"] = {"asset_id": "image:0"}
+            records.append(record)
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "source.jsonl"
+            train = root / "train.jsonl"
+            val = root / "val.jsonl"
+            write_jsonl(source, records)
+            summary = split_jsonl(source, train, val, val_ratio=0.5)
+            output = [record for _, record in iter_jsonl(train)] + [record for _, record in iter_jsonl(val)]
+            self.assertEqual(summary.total_components, 1)
+            self.assertEqual(len({record["group_id"] for record in output}), 1)
+
+    def test_url_query_is_part_of_asset_identity(self):
+        input_path = Path("dataset.jsonl").resolve()
+        first = canonical_asset_identity(
+            {"id": "a", "uri": "https://drive.google.com/uc?id=A"}, input_path
+        )
+        second = canonical_asset_identity(
+            {"id": "b", "uri": "https://drive.google.com/uc?id=B"}, input_path
+        )
+        self.assertNotEqual(first, second)
+
+    def test_relative_ms_swift_media_is_resolved_against_input_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            base_dir = Path(temporary_dir).resolve()
+            value = {
+                "messages": [
+                    {"role": "user", "content": "<image>Question"},
+                    {"role": "assistant", "content": "Answer"},
+                ],
+                "images": ["images/example.jpg"],
+            }
+            record = ms_swift_to_record(value, source_id="relative", media_base_dir=base_dir)
+            self.assertEqual(record["assets"][0]["uri"], str((base_dir / "images/example.jpg").resolve()))
+
+    def test_normalized_xywh_must_fit_after_conversion(self):
+        record = copy.deepcopy(example_records()[1])
+        geometry = record["regions"][0]["geometry"]
+        geometry["format"] = "xywh"
+        geometry["coordinates"] = [0.8, 0.8, 0.5, 0.5]
+        geometry["coordinate_space"] = {"type": "normalized"}
+        issues = validate_record(record, check_json_schema=False)
+        self.assertIn("range", {issue.code for issue in issues})
+
+    def test_manifest_checks_record_count_and_split(self):
+        record = copy.deepcopy(example_records()[0])
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            records = root / "train.jsonl"
+            manifest_path = root / "manifest.json"
+            write_jsonl(records, [record])
+            manifest = {
+                "format": "s1-udf",
+                "schema_version": "1.0.0",
+                "dataset": {"name": "test"},
+                "record_files": [{"path": "train.jsonl", "format": "jsonl", "split": "train", "count": 1}],
+                "splits": {"train": 1},
+            }
+            issues = validate_manifest(
+                manifest, manifest_path=manifest_path, check_json_schema=False, check_files=True
+            )
+            self.assertEqual(issues, [])
+
+    def test_non_finite_json_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            parse_json_strict('{"value": NaN}')
+
+    def test_profiler_reports_nested_fields(self):
+        report = profile_path(EXAMPLES, sample_rows=2, max_depth=4)
+        file_report = report["files"][0]
+        self.assertEqual(file_report["kind"], "jsonl")
+        self.assertEqual(file_report["total_records"], 5)
+        fields = file_report["schema"]["fields"]
+        self.assertIn("$.assets[].uri", fields)
+        self.assertIn("$.group_id", fields)
+
+
+if __name__ == "__main__":
+    unittest.main()

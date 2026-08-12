@@ -65,11 +65,13 @@ def validate_fingerprint(
     evidence: Any,
     label: str,
     cache: dict[str, dict[str, Any]],
+    *,
+    allow_relocated_path: bool = False,
 ) -> None:
     if not isinstance(evidence, dict):
         raise ValueError(f"{label}: dedup report has no file fingerprint")
     resolved = canonical(path)
-    if canonical(evidence.get("path", "")) != resolved:
+    if not allow_relocated_path and canonical(evidence.get("path", "")) != resolved:
         raise ValueError(f"{label}: fingerprint path does not match: {resolved}")
     actual = cache.get(resolved)
     if actual is None:
@@ -144,20 +146,29 @@ def validate_global_dedup(
     if report.get("training_priority") != priority:
         raise ValueError("Global dedup report training_priority does not match manifest")
     if canonical(report.get("manifest", "")) != str(manifest_path.resolve()):
-        raise ValueError("Global dedup report manifest path does not match")
+        report_manifest_sha = report.get("manifest_fingerprint", {}).get("sha256")
+        current_manifest_sha = file_fingerprint(manifest_path)["sha256"]
+        if report_manifest_sha != current_manifest_sha:
+            raise ValueError("Global dedup report manifest content does not match")
     fingerprint_cache: dict[str, dict[str, Any]] = {}
     validate_fingerprint(
         manifest_path,
         report.get("manifest_fingerprint"),
         "manifest",
         fingerprint_cache,
+        allow_relocated_path=True,
     )
     report_datasets = report.get("datasets")
     if not isinstance(report_datasets, dict):
         raise ValueError("Global dedup report has no datasets object")
     report_mtime = report_path.stat().st_mtime_ns
     if manifest_path.stat().st_mtime_ns > report_mtime:
-        raise ValueError("Manifest changed after the global dedup report; rerun dedup")
+        report_manifest_sha = report.get("manifest_fingerprint", {}).get("sha256")
+        current_manifest_sha = file_fingerprint(manifest_path)["sha256"]
+        if report_manifest_sha != current_manifest_sha:
+            raise ValueError(
+                "Manifest content changed after the global dedup report; rerun dedup"
+            )
     require_media_identity = bool(policy.get("require_media_identity", True))
     deduplicate_cross_dataset_train = policy.get(
         "deduplicate_cross_dataset_train", True

@@ -1,0 +1,620 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-07",
+  "default_target_root": "/mnt/luojunkun/stage1/benchmark-stage1",
+  "source_policy": "Prefer ModelScope when a verified public mirror exists; otherwise use Hugging Face. Reuse byte-identical local data and never treat restricted or missing media as a complete benchmark.",
+  "sources": [
+    {
+      "key": "ms-blink",
+      "provider": "modelscope",
+      "repo_id": "evalscope/BLINK",
+      "revision": "15279f9f",
+      "target_dir": "blink",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/evalscope/BLINK"
+    },
+    {
+      "key": "ms-cv-bench",
+      "provider": "modelscope",
+      "repo_id": "hutchinsonian/CV-Bench",
+      "revision": "279b0c05",
+      "target_dir": "cv-bench",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/hutchinsonian/CV-Bench"
+    },
+    {
+      "key": "reuse-pixmo-points",
+      "provider": "reuse",
+      "repo_id": "allenai/pixmo-points",
+      "revision": "bae19d89",
+      "target_dir": "pixmo-points",
+      "reuse_path": "/mnt/luojunkun/stage1/dataset/pixmo-points",
+      "availability": "metadata_only",
+      "url": "https://www.modelscope.cn/datasets/allenai/pixmo-points",
+      "required_files": [
+        {
+          "path": "data/train-00000-of-00002.parquet",
+          "size": 129576317,
+          "sha256": "593831aff098c9bb3cd5bd74bfb05e3b319c0382f858d9d37b85de1a87813688"
+        },
+        {
+          "path": "data/train-00001-of-00002.parquet",
+          "size": 68760454,
+          "sha256": "083a308df3fcea2fd6312c66d489ce2d8c300de26d8249e3f14387f3e8b62c8c"
+        }
+      ],
+      "note": "The local parquet shards are byte-identical to ModelScope. All 2,376,169 converted rows still reference unmaterialized remote image URLs (227,563 unique media), so this is not yet an offline-complete benchmark."
+    },
+    {
+      "key": "hf-pointbench",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/PointBench",
+      "revision": "a57987b9e1300fccf3765f1dc3cede6b82d0d029",
+      "target_dir": "pointbench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/PointBench"
+    },
+    {
+      "key": "unavailable-depth-inhouse",
+      "provider": "unavailable",
+      "availability": "unavailable",
+      "note": "Depth-InHouse is an internal Tencent benchmark and has no verified public ModelScope, Hugging Face, or official download source."
+    },
+    {
+      "key": "hf-3dsrbench",
+      "provider": "huggingface",
+      "repo_id": "ccvl/3DSRBench",
+      "revision": "5c90e422b68d0484d50a3ff06b3096ea7d288026",
+      "target_dir": "3dsrbench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/ccvl/3DSRBench"
+    },
+    {
+      "key": "hf-all-angles-bench",
+      "provider": "huggingface",
+      "repo_id": "ch-chenyu/All-Angles-Bench",
+      "revision": "bb91c32faa9cb23a4302df53e2442c3ac69fe21f",
+      "target_dir": "all-angles-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/ch-chenyu/All-Angles-Bench"
+    },
+    {
+      "key": "ms-da-2k",
+      "provider": "modelscope",
+      "repo_id": "depth-anything/DA-2K",
+      "revision": "b29bd08e",
+      "target_dir": "da-2k",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/depth-anything/DA-2K"
+    },
+    {
+      "key": "ms-erqa",
+      "provider": "modelscope",
+      "repo_id": "evalscope/ERQA",
+      "revision": "fa8ed116",
+      "target_dir": "erqa",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/evalscope/ERQA"
+    },
+    {
+      "key": "ms-embspatial-bench",
+      "provider": "modelscope",
+      "repo_id": "evalscope/EmbSpatial-Bench",
+      "revision": "f1c9db11",
+      "target_dir": "embspatial-bench",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/evalscope/EmbSpatial-Bench"
+    },
+    {
+      "key": "hf-mmsi-bench",
+      "provider": "huggingface",
+      "repo_id": "sihany/MMSI-Bench",
+      "revision": "6c988a330d5261bb4196da8c17df12912d75894a",
+      "target_dir": "mmsi-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/sihany/MMSI-Bench"
+    },
+    {
+      "key": "ms-mindcube",
+      "provider": "modelscope",
+      "repo_id": "haominggu/MindCube",
+      "revision": "4d8121cc",
+      "target_dir": "mindcube",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/haominggu/MindCube"
+    },
+    {
+      "key": "hf-sat-v2",
+      "provider": "huggingface",
+      "repo_id": "array/SAT-v2",
+      "revision": "77d83da806d0a31f837be7b36d0dfbda230d8864",
+      "target_dir": "sat-v2",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/array/SAT-v2"
+    },
+    {
+      "key": "hf-sibench",
+      "provider": "huggingface",
+      "repo_id": "Two-hot/SIBench",
+      "revision": "c7749b4766e4bcf993b54294d68ea85342a0a262",
+      "target_dir": "sibench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/Two-hot/SIBench",
+      "note": "The requested benchmark is the SIBench-mini subset; the repository also contains the media referenced by that subset."
+    },
+    {
+      "key": "hf-site-bench",
+      "provider": "huggingface",
+      "repo_id": "franky-veteran/SITE-Bench",
+      "revision": "2f405b86266cd571b5f0032016b00a51f387aa57",
+      "target_dir": "site-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/franky-veteran/SITE-Bench",
+      "note": "One repository and one set of data_chunked archives serve both SITE-Bench-Image and SITE-Bench-Video."
+    },
+    {
+      "key": "hf-viewspatial-bench",
+      "provider": "huggingface",
+      "repo_id": "lidingm/ViewSpatial-Bench",
+      "revision": "95d9ea3a94da7190bd19d2539ff661f93dba21dd",
+      "target_dir": "viewspatial-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/lidingm/ViewSpatial-Bench"
+    },
+    {
+      "key": "existing-openeqa",
+      "provider": "existing",
+      "target_dir": "openeqa",
+      "availability": "existing_complete",
+      "required_files": [
+        {
+          "path": "v0/test-00000-of-00001.parquet",
+          "size": 140045
+        },
+        {
+          "path": "hm3d-v0.tar.gz",
+          "size": 1020535417
+        },
+        {
+          "path": "scannet-v0.tar.gz",
+          "size": 982282289
+        }
+      ],
+      "minimum_files": 5,
+      "note": "Already present under benchmark-stage1; do not download again."
+    },
+    {
+      "key": "hf-part-affordance-2k",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/Part-Affordance-2K",
+      "revision": "a68f92d11d8a42f69779adb1d91571865e936bc3",
+      "target_dir": "part-affordance-2k",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/Part-Affordance-2K"
+    },
+    {
+      "key": "hf-roboafford-eval",
+      "provider": "huggingface",
+      "repo_id": "tyb197/RoboAfford-Eval",
+      "revision": "da46e3ad9151ba384e912f0687ca64d18ae753b3",
+      "target_dir": "roboafford-eval",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/tyb197/RoboAfford-Eval"
+    },
+    {
+      "key": "hf-roborefit",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/Roborefit",
+      "revision": "46f0a34fed359e2879463b28f85f2a94c091424a",
+      "target_dir": "roborefit",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/Roborefit"
+    },
+    {
+      "key": "hf-refspatial-bench",
+      "provider": "huggingface",
+      "repo_id": "BAAI/RefSpatial-Bench",
+      "revision": "5cb4c34a36c09962442fc5b76e2e462b75008329",
+      "target_dir": "refspatial-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/BAAI/RefSpatial-Bench"
+    },
+    {
+      "key": "existing-robospatial-home",
+      "provider": "existing",
+      "target_dir": "robospatial",
+      "availability": "existing_complete",
+      "required_files": [
+        {
+          "path": "annotations.json",
+          "size": 162741
+        }
+      ],
+      "required_paths": [
+        "images"
+      ],
+      "minimum_files": 823,
+      "note": "Verified as RoboSpatial-Home: 350 annotations split across compatibility/context/configuration as 105/122/123."
+    },
+    {
+      "key": "hf-where2place",
+      "provider": "huggingface",
+      "repo_id": "wentao-yuan/where2place",
+      "revision": "54e4be4680a4f6c3b9348e5af3497cc36dedc08d",
+      "target_dir": "where2place",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/wentao-yuan/where2place"
+    },
+    {
+      "key": "hf-finebench",
+      "provider": "huggingface",
+      "repo_id": "FINEBENCH/FineBench",
+      "revision": "664ca08bafadd8391200d7a3e510c3ce3bf5d2ac",
+      "target_dir": "finebench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/FINEBENCH/FineBench"
+    },
+    {
+      "key": "git-crosshoi-bench",
+      "provider": "git",
+      "repo_url": "https://github.com/ChelsieLei/CrossHOI-Bench.git",
+      "revision": "abc793fc65e8db3970b817b46a3327aacb0eaf5b",
+      "target_dir": "crosshoi-bench",
+      "availability": "metadata_only",
+      "url": "https://github.com/ChelsieLei/CrossHOI-Bench",
+      "note": "The official repository provides benchmark code/annotations, but not all source benchmark media."
+    },
+    {
+      "key": "manual-crosshoi-media",
+      "provider": "manual",
+      "availability": "manual_required",
+      "note": "CrossHOI-Bench must be assembled with the official HICO-DET, V-COCO, and SWiG-HOI media under their respective licenses."
+    },
+    {
+      "key": "hf-pio-bench",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/PIO-Bench",
+      "revision": "2fafd65b21990f85b8484efda15a038f5162fb25",
+      "target_dir": "pio-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/PIO-Bench"
+    },
+    {
+      "key": "hf-pio-s3",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/PIO-S3",
+      "revision": "331e8d3d80f8c1002e098531499f632b97ce70c5",
+      "target_dir": "pio-s3",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/PIO-S3"
+    },
+    {
+      "key": "hf-vabench-p",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/VABench-P",
+      "revision": "3f1f75ce84bd2a862a6611b867f6ddf60cfe46bd",
+      "target_dir": "vabench-point",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/VABench-P"
+    },
+    {
+      "key": "hf-vabench-v",
+      "provider": "huggingface",
+      "repo_id": "IffYuan/vabench-v",
+      "revision": "8be1a99699ec16b5e0bdfa9be0ea4bc1ea966def",
+      "target_dir": "vabench-visual-trace",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/IffYuan/vabench-v"
+    },
+    {
+      "key": "hf-sharerobot-bench",
+      "provider": "huggingface",
+      "repo_id": "BAAI/ShareRobot-Bench",
+      "revision": "68e9c15600f85f601b9cf492e4d994b50ed4cd4d",
+      "target_dir": "sharerobot-bench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/BAAI/ShareRobot-Bench",
+      "note": "One download serves both affordance and trajectory subsets."
+    },
+    {
+      "key": "hf-robobench",
+      "provider": "huggingface",
+      "repo_id": "LeoFan01/RoboBench",
+      "revision": "b2c1b2d4f84a7c2be639741ae2d5c47301f79a67",
+      "target_dir": "robobench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/LeoFan01/RoboBench",
+      "note": "One download serves both MCQ and generalized-planning evaluations."
+    },
+    {
+      "key": "ms-vsi-bench",
+      "provider": "modelscope",
+      "repo_id": "AI-ModelScope/VSI-Bench",
+      "revision": "d75485a4",
+      "target_dir": "vsi-bench",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/AI-ModelScope/VSI-Bench"
+    },
+    {
+      "key": "hf-egoplan2-metadata",
+      "provider": "huggingface",
+      "repo_id": "qiulu66/EgoPlan-Bench2",
+      "revision": "21d21960195a6029ae5d1f51c9474e7e02f339ca",
+      "target_dir": "egoplan2",
+      "availability": "metadata_only",
+      "url": "https://huggingface.co/datasets/qiulu66/EgoPlan-Bench2",
+      "note": "Contains 1,321 public annotation rows but not the Ego4D videos."
+    },
+    {
+      "key": "restricted-egoplan2-media",
+      "provider": "manual",
+      "availability": "restricted",
+      "note": "EgoPlan2 media must be obtained through an authorized Ego4D account. The existing 3,343-row EpicKitchens EgoPlan benchmark is a different dataset and cannot be reused."
+    },
+    {
+      "key": "ms-cosmos-reason1-benchmark",
+      "provider": "modelscope",
+      "repo_id": "nv-community/Cosmos-Reason1-Benchmark",
+      "revision": "5f0483ae",
+      "target_dir": "cosmos-reason1-benchmark",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/nv-community/Cosmos-Reason1-Benchmark"
+    },
+    {
+      "key": "hf-vlabench",
+      "provider": "huggingface",
+      "repo_id": "VLABench/vlm_evaluation_v1.0",
+      "revision": "b432f0c69ec0731935ff49a916d460936a000624",
+      "target_dir": "vlabench",
+      "availability": "public",
+      "url": "https://huggingface.co/datasets/VLABench/vlm_evaluation_v1.0"
+    },
+    {
+      "key": "ms-robofac",
+      "provider": "modelscope",
+      "repo_id": "MinghaoYE/RoboFAC-dataset",
+      "revision": "d5e20c56",
+      "target_dir": "robofac",
+      "availability": "public",
+      "url": "https://www.modelscope.cn/datasets/MinghaoYE/RoboFAC-dataset"
+    }
+  ],
+  "benchmarks": [
+    {
+      "name": "BLINK",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-blink"],
+      "availability": "complete"
+    },
+    {
+      "name": "CV-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-cv-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "PixMo-Points",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["reuse-pixmo-points"],
+      "availability": "metadata_only"
+    },
+    {
+      "name": "PointBench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-pointbench"],
+      "availability": "complete"
+    },
+    {
+      "name": "Depth-InHouse",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["unavailable-depth-inhouse"],
+      "availability": "unavailable"
+    },
+    {
+      "name": "3DSRBench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-3dsrbench"],
+      "availability": "complete"
+    },
+    {
+      "name": "All-Angles-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-all-angles-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "DA-2K",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-da-2k"],
+      "availability": "complete"
+    },
+    {
+      "name": "ERQA",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-erqa"],
+      "availability": "complete"
+    },
+    {
+      "name": "EmbSpatial-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-embspatial-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "MMSI-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-mmsi-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "MindCube",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["ms-mindcube"],
+      "availability": "complete"
+    },
+    {
+      "name": "SAT",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-sat-v2"],
+      "availability": "complete",
+      "subset": "SAT-v2"
+    },
+    {
+      "name": "SIBench-mini",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-sibench"],
+      "availability": "complete",
+      "subset": "SIBench-mini"
+    },
+    {
+      "name": "SITE-Bench-Image",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-site-bench"],
+      "availability": "complete",
+      "subset": "image_test.json"
+    },
+    {
+      "name": "ViewSpatial-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-viewspatial-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "OpenEQA",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["existing-openeqa"],
+      "availability": "complete"
+    },
+    {
+      "name": "PartAfford",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-part-affordance-2k"],
+      "availability": "complete"
+    },
+    {
+      "name": "RoboAfford",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-roboafford-eval"],
+      "availability": "complete"
+    },
+    {
+      "name": "RoboRefIt",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-roborefit"],
+      "availability": "complete"
+    },
+    {
+      "name": "RefSpatial-Bench",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-refspatial-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "RoboSpatial-Home",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["existing-robospatial-home"],
+      "availability": "complete"
+    },
+    {
+      "name": "Where2Place",
+      "category": "action_relevant_state_understanding",
+      "source_keys": ["hf-where2place"],
+      "availability": "complete"
+    },
+    {
+      "name": "FineBench",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-finebench"],
+      "availability": "complete"
+    },
+    {
+      "name": "CrossHOI-Bench",
+      "category": "action_transition_reasoning",
+      "source_keys": ["git-crosshoi-bench", "manual-crosshoi-media"],
+      "availability": "manual_composite"
+    },
+    {
+      "name": "PIO",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-pio-bench", "hf-pio-s3"],
+      "availability": "complete"
+    },
+    {
+      "name": "VABench-Point",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-vabench-p"],
+      "availability": "complete"
+    },
+    {
+      "name": "VABench-Visual-Trace",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-vabench-v"],
+      "availability": "complete"
+    },
+    {
+      "name": "ShareRobot-Bench-Affordance",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-sharerobot-bench"],
+      "availability": "complete",
+      "subset": "affordance"
+    },
+    {
+      "name": "ShareRobot-Bench-Trajectory",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-sharerobot-bench"],
+      "availability": "complete",
+      "subset": "trajectory"
+    },
+    {
+      "name": "RoboBench-MCQ",
+      "category": "action_transition_reasoning",
+      "source_keys": ["hf-robobench"],
+      "availability": "complete",
+      "subset": "MCQ"
+    },
+    {
+      "name": "SITE-Bench-Video",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["hf-site-bench"],
+      "availability": "complete",
+      "subset": "video_test.json"
+    },
+    {
+      "name": "VSIBench",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["ms-vsi-bench"],
+      "availability": "complete"
+    },
+    {
+      "name": "EgoPlan2",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["hf-egoplan2-metadata", "restricted-egoplan2-media"],
+      "availability": "restricted"
+    },
+    {
+      "name": "Cosmos",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["ms-cosmos-reason1-benchmark"],
+      "availability": "complete"
+    },
+    {
+      "name": "VLABench",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["hf-vlabench"],
+      "availability": "complete"
+    },
+    {
+      "name": "RoboBench-Planning",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["hf-robobench"],
+      "availability": "complete",
+      "subset": "generalized_planning"
+    },
+    {
+      "name": "RoboFAC",
+      "category": "sequential_adaptive_reasoning",
+      "source_keys": ["ms-robofac"],
+      "availability": "complete"
+    }
+  ]
+}

@@ -7,17 +7,22 @@ set -euo pipefail
 : "${MASTER_ADDR:?DLC must provide MASTER_ADDR}"
 : "${MODEL_PATH:?Set MODEL_PATH to the base/full checkpoint shared by every node}"
 
-NPROC_PER_NODE=${NPROC_PER_NODE:-8}
+NPROC_PER_NODE=${NPROC_PER_NODE:-16}
+EXPECTED_NNODES=${EXPECTED_NNODES:-3}
 EXPECTED_WORLD_SIZE=${EXPECTED_WORLD_SIZE:-48}
 TOTAL_PROCESSES=$((WORLD_SIZE * NPROC_PER_NODE))
+if [[ ${WORLD_SIZE} -ne ${EXPECTED_NNODES} ]]; then
+  echo "Expected ${EXPECTED_NNODES} nodes, got WORLD_SIZE=${WORLD_SIZE}" >&2
+  exit 2
+fi
 if [[ ${TOTAL_PROCESSES} -ne ${EXPECTED_WORLD_SIZE} ]]; then
   echo "Expected ${EXPECTED_WORLD_SIZE} accelerators, got WORLD_SIZE=${WORLD_SIZE} x NPROC_PER_NODE=${NPROC_PER_NODE}" >&2
   exit 2
 fi
 
 STAGE_ROOT=${STAGE_ROOT:-/mnt/luojunkun/stage1}
-TOOL_ROOT=${TOOL_ROOT:-/mnt/workspace/stage1/scripts}
-OUTPUT_DIR=${OUTPUT_DIR:-${STAGE_ROOT}/sft-model/qwen3-vl-stage1-dlc48-full}
+TOOL_ROOT=${TOOL_ROOT:-${STAGE_ROOT}/sft-model/scripts}
+OUTPUT_DIR=${OUTPUT_DIR:-${STAGE_ROOT}/sft-model/qwen3-vl-stage1-dlc3x16-full}
 MAX_LENGTH=${MAX_LENGTH:-65536}
 SEQUENCE_PARALLEL_SIZE=${SEQUENCE_PARALLEL_SIZE:-8}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
@@ -56,12 +61,13 @@ assert report.get("status") == "complete"
 assert report.get("verification", {}).get("status") == "complete"
 assert report["verification"]["train_eval_overlap_rows"] == 0
 assert audit.get("status") == "passed", audit.get("hard_failures")
-assert Path(audit.get("manifest", "")).resolve() == manifest_path
 manifest_fingerprint = report.get("manifest_fingerprint", {})
-assert Path(manifest_fingerprint.get("path", "")).resolve() == manifest_path
-assert manifest_fingerprint.get("sha256") == hashlib.sha256(
-    manifest_path.read_bytes()
-).hexdigest(), "ready manifest changed after decontamination"
+manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+assert (
+    Path(audit.get("manifest", "")).resolve() == manifest_path
+    or manifest_fingerprint.get("sha256") == manifest_sha256
+)
+assert manifest_fingerprint.get("sha256") == manifest_sha256, "ready manifest changed after decontamination"
 for name, config in manifest["datasets"].items():
     if config.get("enabled", True):
         path = Path(config["train"]).resolve()

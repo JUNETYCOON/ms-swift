@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multimodal to ms-swift"
+  short_description: "Convert multimodal data into validated ms-swift JSONL"
+  default_prompt: "Use $convert-multimodal-to-ms-swift to inspect and convert this multimodal dataset into deterministic, leakage-safe ms-swift JSONL."

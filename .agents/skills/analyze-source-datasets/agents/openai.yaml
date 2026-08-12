@@ -1,0 +1,4 @@
+interface:
+  display_name: "Source Dataset Analyzer"
+  short_description: "Dataset sampling with complete verbatim JSON reports"
+  default_prompt: "Use $analyze-source-datasets to inspect this dataset, archive deterministic samples, and produce validated HTML reports with every sample JSON shown completely and verbatim."

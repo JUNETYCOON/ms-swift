@@ -179,7 +179,7 @@ run_pair() {
 run_pair ai2d "${DATA_ROOT}/ai2d/ai2d_pretrain_msswift_eval.jsonl" description 16 64 ''
 run_pair chartqa "${DATA_ROOT}/chartqa/chartqa_val_sft_msswift.jsonl" vqa 32 16 ''
 run_pair textvqa "${DATA_ROOT}/textvqa/textvqa_validation_sft_msswift.jsonl" vqa 16 16 ''
-run_pair robo2vlm "${DATA_ROOT}/robo2vlm/robo2vlm_test.jsonl" vqa 16 64 ''
+run_pair robo2vlm "${DATA_ROOT}/robo2vlm/robo2vlm_sft_eval.jsonl" vqa 16 64 ''
 run_pair visualgenome_qa "${DATA_ROOT}/visualgenome/visualgenome_qa_val.jsonl" vqa 24 16 ''
 run_pair vlm_r1_grounding "${DATA_ROOT}/vlm-r1/vlm_r1_sft_grounding_msswift_eval.jsonl" grounding 16 64 ''
 run_pair vg-grounding "${DATA_ROOT}/visualgenome_grounding/visualgenome_regions_grounding_val.jsonl" grounding 32 16 ''

@@ -64,6 +64,29 @@ class VQAMetricTest(unittest.TestCase):
         scores = vqa_scores('cat', ['cat', 'cat', 'dog', 'bird'])
         self.assertAlmostEqual(scores['vqa_accuracy'], 2 / 3)
 
+    def test_multiple_choice_accepts_label_text_or_both_and_rejects_conflicts(self):
+        question = (
+            'Was the task completed?\nChoices:\n'
+            'A. No\nB. Yes\nC. Cannot be determined\nD. Task was not attempted'
+        )
+        for prediction in ('B', 'b', 'B.', 'Yes', 'B. Yes', 'b. yes', 'Answer: B'):
+            with self.subTest(prediction=prediction):
+                scores = vqa_scores(prediction, ['B. Yes'], question)
+                self.assertEqual(scores['answer_type'], 'multiple_choice')
+                self.assertEqual(scores['vqa_accuracy'], 1.0)
+                self.assertEqual(scores['answer_accuracy'], 1.0)
+                self.assertEqual(scores['token_f1'], 1.0)
+
+        for prediction in (
+            'A. No',
+            'A. Yes',
+            "['No', 'Yes', 'Cannot be determined', 'Task was not attempted']",
+        ):
+            with self.subTest(prediction=prediction):
+                scores = vqa_scores(prediction, ['B. Yes'], question)
+                self.assertEqual(scores['vqa_accuracy'], 0.0)
+                self.assertEqual(scores['answer_accuracy'], 0.0)
+
     def test_yes_no_uses_first_explicit_prediction_token_and_cleans_reference_markup(self):
         scores = vqa_scores(
             'After checking the video: yes, the robot moves.',

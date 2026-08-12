@@ -1,0 +1,182 @@
+{
+  "version": 2,
+  "description": "Stage 1 DLC entrypoints. Reserve all eval media globally, remove train-vs-eval contamination, and retain cross-dataset train supervision.",
+  "global_dedup": {
+    "required": true,
+    "require_media_identity": true,
+    "deduplicate_cross_dataset_train": false,
+    "training_priority": [
+      "ai2d",
+      "chartqa",
+      "gqa",
+      "textvqa",
+      "visualgenome-qa",
+      "visualgenome-regions",
+      "vlm-r1",
+      "vqav2",
+      "robo2vlm",
+      "robovqa",
+      "llava",
+      "spatialvlm",
+      "pixmo-cap",
+      "pixmo-points",
+      "molmo2-video-track",
+      "coco"
+    ],
+    "report": "/mnt/luojunkun/stage1/dataset_ms-swift/dlc_train_eval_decontamination_report.json",
+    "exclusions": "/mnt/luojunkun/stage1/dataset_ms-swift/dlc_train_eval_exclusions.jsonl",
+    "cache_db": "/mnt/workspace/stage1/.dlc-media-identity-cache.sqlite"
+  },
+  "datasets": {
+    "ai2d": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/ai2d/ai2d_pretrain_msswift_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/ai2d/ai2d_pretrain_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/ai2d/ai2d_pretrain_msswift_eval.jsonl"
+    },
+    "chartqa": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/chartqa/chartqa_train_sft_msswift.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/chartqa/chartqa_train_sft_msswift_dlc_train.jsonl",
+      "eval": [
+        "/mnt/luojunkun/stage1/dataset_ms-swift/chartqa/chartqa_val_sft_msswift.jsonl",
+        "/mnt/luojunkun/stage1/dataset_ms-swift/chartqa/chartqa_test_sft_msswift.jsonl"
+      ]
+    },
+    "gqa": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/gqa/gqa_train_balanced_sft_msswift.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/gqa/gqa_train_balanced_sft_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/gqa/gqa_val_balanced_sft_msswift.jsonl"
+    },
+    "textvqa": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/textvqa/textvqa_train_sft_msswift.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/textvqa/textvqa_train_sft_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/textvqa/textvqa_validation_sft_msswift.jsonl"
+    },
+    "visualgenome-qa": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_qa_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_qa_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_qa_val.jsonl"
+    },
+    "visualgenome-regions": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_regions_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_regions_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/visualgenome/visualgenome_regions_val.jsonl"
+    },
+    "vlm-r1": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/vlm-r1/vlm_r1_sft_grounding_msswift_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/vlm-r1/vlm_r1_sft_grounding_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/vlm-r1/vlm_r1_sft_grounding_msswift_eval.jsonl"
+    },
+    "vqav2": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/VQAv2/vqav2_train_sft_msswift.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/VQAv2/vqav2_train_sft_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/VQAv2/vqav2_validation_sft_msswift.jsonl"
+    },
+    "robo2vlm": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm/robo2vlm_sft_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm/robo2vlm_sft_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm/robo2vlm_sft_eval.jsonl"
+    },
+    "robovqa": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/robovqa/robovqa_train_sft_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/robovqa/robovqa_train_sft_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/robovqa/robovqa_train_sft_eval.jsonl"
+    },
+    "llava": {
+      "enabled": true,
+      "allow_text_only": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/llava-instruct/llava_v1_5_mix665k_sft_msswift_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/llava-instruct/llava_v1_5_mix665k_sft_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/llava-instruct/llava_v1_5_mix665k_sft_msswift_val.jsonl"
+    },
+    "spatialvlm": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/spatialvlm/train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/spatialvlm/dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/spatialvlm/val.jsonl",
+      "prerequisite_report": "/mnt/luojunkun/stage1/dataset_ms-swift/spatialvlm/conversion_report.json",
+      "prerequisite_values": {
+        "configuration.spatialvlm_split_policy": "preserve_official_train_test_and_reserve_test_image_sha256",
+        "spatialvlm_official_split_audit.official_test_records_written_to_train": 0,
+        "spatialvlm_official_split_audit.official_train_records_written_to_val": 0,
+        "spatialvlm_official_split_audit.post_filter_train_test_hash_overlap": 0,
+        "unique_media.cross_split_leakage": 0
+      }
+    },
+    "pixmo-cap": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-cap/local_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-cap/local_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-cap/local_val.jsonl",
+      "prerequisite_report": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-cap/localization_report.json",
+      "prerequisite_values": {
+        "media.pending_media": 0,
+        "splits.train.written_records": 311049,
+        "splits.val.written_records": 16232
+      }
+    },
+    "pixmo-points": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/local_train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/local_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/local_val.jsonl",
+      "prerequisite_report": "/mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/localization_report.json",
+      "prerequisite_values": {
+        "media.pending_media": 0,
+        "splits.train.written_records": 1016111,
+        "splits.val.written_records": 53057
+      }
+    },
+    "molmo2-video-track": {
+      "enabled": true,
+      "identity_namespace": "molmo2-video-track",
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/train.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/val.jsonl",
+      "prerequisite_report": "/mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/audit_report.json",
+      "prerequisite_values": {
+        "status": "passed",
+        "lineage.cross_split_lineages": 0,
+        "media.failed": 0,
+        "splits.train.valid_records": 23620,
+        "splits.val.valid_records": 1014
+      }
+    },
+    "coco": {
+      "enabled": true,
+      "source_train": "/mnt/luojunkun/stage1/dataset_ms-swift/coco/coco_train_sft_msswift.jsonl",
+      "train": "/mnt/luojunkun/stage1/dataset_ms-swift/coco/coco_train_sft_msswift_dlc_train.jsonl",
+      "eval": "/mnt/luojunkun/stage1/dataset_ms-swift/coco/coco_val_sft_msswift.jsonl",
+      "prerequisite_report": "/mnt/luojunkun/stage1/dataset_ms-swift/coco/conversion_report.json",
+      "prerequisite_values": {
+        "validation.status": "passed",
+        "validation.split_media_sha256_disjoint": true,
+        "validation.output_media_exists": true,
+        "source_readonly.status": "passed"
+      }
+    }
+  },
+  "excluded_datasets": {
+    "Molmo2-VideoCapQA": "Not part of this training run; previous conversion has incomplete media.",
+    "Molmo2-VideoPoint": "Not part of this training run; previous conversion has incomplete media.",
+    "Molmo2-VideoSubtitleQA": "Not part of this training run; previous conversion has incomplete media.",
+    "pixmo-raw": "Raw PixMo entrypoints reference unavailable media; local_* entrypoints are used instead.",
+    "global-train": "Existing *_global_train.jsonl files remove cross-dataset train media too aggressively."
+  },
+  "rules": [
+    "Use only enabled dataset train entries for SFT and eval entries only for validation.",
+    "Never train from source_train, eval, raw PixMo, or *_global_train.jsonl paths.",
+    "Every eval media identity is globally reserved and excluded from every DLC train output.",
+    "Cross-dataset train media and distinct supervision are retained.",
+    "A complete decontamination report with zero train_eval_overlap_rows is mandatory."
+  ]
+}

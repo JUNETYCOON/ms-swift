@@ -173,19 +173,158 @@ python scripts/prepare_vqav2_swift.py \
 | --- | --- |
 | `curate_llava_sft.py` | 优先保留独立 GQA/TextVQA/VisualGenome 数据，移除 LLaVA 中对应副本和 VQAv2 精确问题重叠，再按完整图片切分 |
 | `curate_robovqa_sft.py` | 清理 RoboVQA 合成推理并按完整视频切分 |
-| `split/split_ai2d.py` | 通用的确定性逐行 train/eval 切分；可用 `--validate-json`，但不提供媒体级防泄漏 |
-| `split/split_robo2vlm.py` | 合并 Robo2VLM 源 split，并按 trajectory ID 保留全部 `_qN` 问题 |
+| `split/split_ai2d.py` | 按图像字节 SHA-256 切分；可用现有 eval 作为保留集合，严格保证同图不跨 split |
+| `split/split_robo2vlm.py` | 合并 Robo2VLM 源 split，去掉尾部 `_qN` 后按底层 episode/frame lineage 保留全部问题 |
 | `split/split_robovqa.py` | 按 `videos` 分组切分并验证媒体零重叠 |
-| `split/split_vlmr1.py` | 按 `images` 分组切分，可用 `--stratify-key __kind__` 近似保持 QA/grounding 比例 |
+| `split/split_vlmr1.py` | 按图像字节 SHA-256 分组切分，并分别报告 QA/grounding 行数 |
 | `split/grouped_jsonl_split.py` | 上述分组切分器共享实现，不是面向用户的命令入口 |
 
 数据集包含同图、同视频或同轨迹的多条问答时，不要使用逐行随机切分。分组切分的 eval 行数是按组逼近 `--eval-ratio`，不保证恰好等于总行数乘比例。
+
+已有 eval 已用于历史评测时，使用 `--reserved-eval-json` 和 `--reserve-only` 保留其媒体成员，再从完整 source 重建严格 train。例如 AI2D：
+
+```bash
+python scripts/split/split_ai2d.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/ai2d/ai2d_pretrain_msswift_eval.jsonl \
+  --reserve-only \
+  --overwrite
+```
+
+训练只能使用 `ai2d_pretrain_msswift_train.jsonl`。禁止把完整 `ai2d_pretrain_msswift.jsonl` 与 eval 同时使用。报告中的 `train_eval_overlap` 必须为 0。
+
+VLM-R1 和 Robo2VLM 同样保留已经用于历史评测的 eval 媒体组：
+
+```bash
+python scripts/split/split_vlmr1.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/vlm-r1/vlm_r1_sft_grounding_msswift_eval.jsonl \
+  --reserve-only \
+  --overwrite
+
+python scripts/split/split_robo2vlm.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm/robo2vlm_sft_eval.jsonl \
+  --reserve-only \
+  --overwrite
+```
+
+Robo2VLM 的官方 source `test` 与 `train` 共享底层 episode，不能直接把 source test 当成独立验证集。必须先用 `prepare_robo2vlm_swift.py` 把 parquet 中可能嵌套的选项展开为逐行 `A/B/C...`，再合并两个 source JSONL，按去掉 `_qN` 后的完整 lineage 重切；该数据是多选 VQA / 具身状态理解，不是 caption。评分器将 `B`、选项文本和 `B. 选项文本` 视为同一答案，但拒绝整份选项列表及标签/文本冲突的输出。
+
+## 全局媒体去重
+
+单数据集内零交叉还不够。`global_media_dedup.py` 读取 v2 curated manifest，先保留所有 eval 媒体，再按 `global_dedup.training_priority` 为训练媒体分配唯一数据集归属：
+
+- 图像：SHA-256、COCO image ID、规范路径/URL；
+- 视频：规范路径/URL、视频文件 ID、显式 episode/video/trajectory 字段；
+- Robo2VLM：额外使用去掉 `_qN` 后的 episode/frame lineage；
+- 同一数据集同一媒体上的多条 QA 会全部保留，只有跨数据集重复或 train/eval 重复会被排除。
+
+```bash
+python scripts/global_media_dedup.py \
+  --manifest /mnt/luojunkun/stage1/dataset_ms-swift/curated_dataset_entrypoints.json \
+  --overwrite
+
+python scripts/validate_sft_entrypoints.py \
+  --manifest /mnt/luojunkun/stage1/dataset_ms-swift/curated_dataset_entrypoints.json
+```
+
+当 manifest 设置 `global_dedup.required=true` 时，校验器只接受其中列出的全局 clean `train`，拒绝 `source_only`、`source_train`、`split_train` 和任意未登记训练路径。去重报告必须是 `complete`，且后验 `train_eval_overlap_rows`、`cross_dataset_train_overlap_rows` 均为 0；任何输入在报告生成后发生变化，也必须重新去重。
+
+去重运行期间不得修改 JSONL 或其媒体文件。同一路径首次访问时校验文件类型、size 和 mtime，并计算或复用 SHA-256；同次运行后续访问走进程内缓存，跨运行复用 SQLite 缓存时重新校验 size 和 mtime。
+
+OSSFS 等高延迟挂载可设置 `--hash-workers 16 --hash-prefetch-rows 2000` 并发读取每批本地图片。记录过滤、SQLite cache/owner 写入和输出顺序仍由主线程串行执行；并发只用于文件 `stat` 与 SHA-256 计算。
+
+`global_dedup.require_media_identity` 默认开启。任一启用数据集的 train/eval 行若无法解析出图像、视频或 episode/trajectory 身份，全局去重会直接失败；入口校验器也要求报告中的 `train_rows_without_identity` 和 `eval_rows_without_identity` 均为 0，禁止用“无法审计的行”得到表面上的零重叠结论。
+
+对于明确混合纯文本对话的数据集，可在单个数据集配置中设置 `allow_text_only: true`。这类行使用 canonical `messages` 的 SHA-256 作为全局 `text:sha256` 身份；输入消息包含 `<image>`、`<video>`、`<audio>`，或任意消息包含媒体内容块但缺少媒体路径时仍会失败，不能借纯文本开关绕过缺失媒体检查。assistant 回答中的字面 HTML 标签（例如讲解 `<video>` 元素）按纯文本处理。
+
+SpatialVLM 转换必须保留 parquet 文件声明的官方 split：`test-*` 只进入 val，`train-*` 只进入 train。转换器会预扫描完整 official test 图像 SHA-256 集，并排除 train 中命中该集合的记录。旧转换把约 8,222 条 test 来源记录写入 train，旧入口已失效，不能用于训练。
+
+完整 Stage 1 整改和验收顺序如下。先重建四个受影响的数据集，再安装最终 manifest、生成全局 clean train，最后校验所有训练入口：
+
+```bash
+python scripts/split/split_ai2d.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/ai2d/ai2d_pretrain_msswift_eval.jsonl \
+  --reserve-only \
+  --overwrite
+
+python scripts/split/split_vlmr1.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/vlm-r1/vlm_r1_sft_grounding_msswift_eval.jsonl \
+  --reserve-only \
+  --overwrite
+
+python scripts/prepare_robo2vlm_swift.py \
+  --input-dir /mnt/luojunkun/stage1/dataset/robo2vlm \
+  --output-dir /mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm \
+  --dataset-mode sft \
+  --reuse-existing-images \
+  --validate-reused-images \
+  --missing-image-policy error \
+  --overwrite
+
+python scripts/split/split_robo2vlm.py \
+  --reserved-eval-json /mnt/luojunkun/stage1/dataset_ms-swift/robo2vlm/robo2vlm_sft_eval.jsonl \
+  --reserve-only \
+  --overwrite
+
+python scripts/prepare_molmo_pixmo_spatial_swift.py \
+  --datasets spatialvlm \
+  --input-root /mnt/luojunkun/stage1/dataset \
+  --output-root /mnt/luojunkun/stage1/dataset_ms-swift \
+  --overwrite
+
+python scripts/verify_stage1_data_remediation.py \
+  --data-root /mnt/luojunkun/stage1/dataset_ms-swift \
+  --manifest scripts/curated_dataset_entrypoints.stage1.json \
+  --output /mnt/luojunkun/stage1/dataset_ms-swift/stage1_data_remediation_report.json
+
+install -m 0644 scripts/curated_dataset_entrypoints.stage1.json \
+  /mnt/luojunkun/stage1/dataset_ms-swift/curated_dataset_entrypoints.json
+
+python scripts/global_media_dedup.py \
+  --manifest /mnt/luojunkun/stage1/dataset_ms-swift/curated_dataset_entrypoints.json \
+  --overwrite
+
+python scripts/validate_sft_entrypoints.py \
+  --manifest /mnt/luojunkun/stage1/dataset_ms-swift/curated_dataset_entrypoints.json
+```
+
+`stage1_data_remediation_report.json` 必须记录 AI2D 79 个、VLM-R1 2,825 个历史 eval 图像组，以及 Robo2VLM 1,582 个历史 eval lineage 和 5,239 个官方 train/test 共享 lineage，并验证 split 文件 SHA-256。SpatialVLM 的转换报告必须绑定 train、val 和媒体组清单的 SHA-256，三个官方 split 泄漏计数必须全为 0。
+
+### DLC 训练入口：只清除 train/eval 污染
+
+48 卡全量训练不使用上述 `*_global_train.jsonl`。本次策略在 manifest 中设置
+`deduplicate_cross_dataset_train=false`：所有 eval 媒体仍在全局保留，任何训练行只要命中任一 eval
+媒体就会被排除；不同训练数据集共享同一媒体时，各自的不同任务和监督全部保留。最终训练入口使用
+`*_ready_train.jsonl` 命名，避免和 strict global 结果及清洗前的 `*_dlc_train.jsonl` 混淆。
+
+```bash
+python scripts/global_media_dedup.py \
+  --manifest scripts/dlc_ready_entrypoints.stage1.json \
+  --hash-workers 16 \
+  --hash-prefetch-rows 4000 \
+  --overwrite
+
+python scripts/validate_sft_entrypoints.py \
+  --manifest scripts/dlc_ready_entrypoints.stage1.json
+
+python scripts/audit_dlc_sft.py \
+  --manifest scripts/dlc_ready_entrypoints.stage1.json \
+  --workers 8 \
+  --samples-per-dataset 3
+```
+
+最终报告
+`/mnt/luojunkun/stage1/dataset_ms-swift/dlc_sft_audit_report.json` 必须为
+`status=passed`，其中 `train_eval_overlap_rows=0`、schema error 和精确重复行均为 0。
+Grounding 抽样不是只打印坐标：`dlc_sft_audit_visualizations/` 会把真值 bbox/point
+画回原图，VideoTrack 会抽取对应视频帧并叠加逐帧真值点。完整的 48 卡命令和参数说明见
+[README_dlc48_stage1_sft.md](README_dlc48_stage1_sft.md)。
 
 ## 校验与独立评分
 
 | 脚本 | 用途和典型入口 |
 | --- | --- |
 | `audit_robovqa_contamination.py` | 审计 RoboVQA 最终答案中的推理污染；详见 RoboVQA 流程 |
+| `audit_dlc_sft.py` | 流式校验 DLC JSONL schema、占位符、媒体、objects、重复行和分布，并在原图/视频帧绘制 grounding 真值抽样 |
 | `validate_sft_entrypoints.py` | 根据 curated manifest 拒绝重复路径、train/eval 混用、源文件与 curated split 同时启用 |
 | `validate_visualgenome_grounded_graph.py` | 校验 grounded graph 数据、媒体和 bbox 边界；split 校验硬编码对应生成器默认 `val_ratio=0.01`、`seed=42`，自定义切分不能直接使用；`--repair-bounds` 会修改数据，使用前备份 |
 | `evaluate_grounding_iou.py` | 对 swift infer JSONL 计算多框 IoU、阈值准确率和分组指标；支持 line-aligned ground truth、optimal/ordered 匹配和错误明细 |
@@ -225,6 +364,30 @@ python scripts/evaluate_grounding_iou.py \
 - baseline/ours 汇总、结果完整性校验和 HTML/CSV/Markdown 报告。
 
 完整用法见 [benchmark-tool/README.md](benchmark-tool/README.md)。`benchmark-tool/*.pre-*-20260801`、`README copy.md` 和测试归档是历史快照，不应作为运行入口。
+
+### Hy-Embodied benchmark 下载
+
+`benchmark-tool/hy_benchmark_sources.json` 固定了 38 个 Hy-Embodied 表项的来源和 revision。相同仓库只下载一次：SITE-Bench 的 Image/Video、ShareRobot 的 Affordance/Trajectory、RoboBench 的 MCQ/Planning 分别共享一份数据。下载前先检查映射和 dry-run：
+
+```bash
+python scripts/benchmark-tool/download_hy_benchmarks.py --list
+
+python scripts/benchmark-tool/download_hy_benchmarks.py \
+  --dry-run \
+  --target-root /mnt/luojunkun/stage1/benchmark-stage1
+```
+
+全量执行：
+
+```bash
+python scripts/benchmark-tool/download_hy_benchmarks.py \
+  --target-root /mnt/luojunkun/stage1/benchmark-stage1 \
+  --jobs 4
+```
+
+ModelScope 通过公共 HTTP API 递归分页下载，并按文件大小和 SHA-256 校验；Hugging Face 使用 `hf download` 的 LFS/断点续传能力。每个完整来源写入 `.hy-benchmark-download.json`，总报告写入 `_hy_benchmark_download_report.json`。重跑会复用匹配的完成标记，`--refresh` 会重新检查来源。
+
+报告状态必须按字面理解：`complete` 才表示本地数据可用；`metadata_only` 表示媒体未完整落盘；`restricted` 表示需要授权；`manual_required` 表示还需拼装官方外部媒体；`unavailable` 表示没有可验证的公开源。目前 PixMo-Points 是已验 SHA-256 的本地 parquet，但图片仍是未验证远程 URL；EgoPlan2 缺少需 Ego4D 授权的视频；CrossHOI-Bench 仍需 HICO-DET、V-COCO、SWiG-HOI；Depth-InHouse 无公开源。原版 EgoPlan 不能替代 EgoPlan2。
 
 ## 其他目录
 

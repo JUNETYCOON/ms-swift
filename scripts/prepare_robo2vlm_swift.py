@@ -99,6 +99,12 @@ def parse_args() -> argparse.Namespace:
         help="How to handle rows whose image cannot be resolved or extracted.",
     )
     parser.add_argument(
+        "--invalid-text-policy",
+        choices=("skip", "error"),
+        default="error",
+        help="How to handle rows with invalid questions, choices, or answers.",
+    )
+    parser.add_argument(
         "--image-dir",
         type=Path,
         default=None,
@@ -423,12 +429,18 @@ def extract_image_value(
 def normalize_choices(value: Any) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, list):
-        return [text for item in value if (text := " ".join(str(item).split()))]
-    if isinstance(value, tuple):
-        return [text for item in value if (text := " ".join(str(item).split()))]
+    if isinstance(value, (list, tuple)):
+        choices: list[str] = []
+        for item in value:
+            if isinstance(item, (list, tuple)) or hasattr(item, "tolist"):
+                choices.extend(normalize_choices(item))
+            elif text := " ".join(str(item).split()):
+                choices.append(text)
+        return choices
     if hasattr(value, "tolist"):
-        return normalize_choices(value.tolist())
+        converted = value.tolist()
+        if converted is not value:
+            return normalize_choices(converted)
     text = str(value).strip()
     if not text:
         return []
@@ -439,7 +451,10 @@ def normalize_choices(value: Any) -> list[str]:
             parsed = ast.literal_eval(text)
         except (SyntaxError, ValueError):
             return [text]
-    return normalize_choices(parsed)
+    if isinstance(parsed, (list, tuple)) or hasattr(parsed, "tolist"):
+        return normalize_choices(parsed)
+    normalized = " ".join(str(parsed).split())
+    return [normalized] if normalized else []
 
 
 def format_choices(choices: list[str], choice_format: str) -> str:
@@ -454,9 +469,9 @@ def choice_label(index: int) -> str:
     return chr(ord("A") + index) if index < 26 else str(index + 1)
 
 
-def resolve_answer(correct_answer: Any, choices: list[str], answer_format: str) -> str:
+def resolve_answer_index(correct_answer: Any, choices: list[str]) -> int | None:
     if correct_answer is None:
-        return ""
+        return None
     answer_index: int | None = None
     if isinstance(correct_answer, int) and not isinstance(correct_answer, bool):
         answer_index = correct_answer
@@ -470,6 +485,35 @@ def resolve_answer(correct_answer: Any, choices: list[str], answer_format: str) 
             if text == choice:
                 answer_index = index
                 break
+    return answer_index
+
+
+def deduplicate_choices(choices: list[str], correct_answer: Any) -> tuple[list[str], Any]:
+    answer_index = resolve_answer_index(correct_answer, choices)
+    unique_choices: list[str] = []
+    canonical_indices: dict[str, int] = {}
+    index_remap: list[int] = []
+    for choice in choices:
+        key = choice.casefold()
+        canonical_index = canonical_indices.get(key)
+        if canonical_index is None:
+            canonical_index = len(unique_choices)
+            canonical_indices[key] = canonical_index
+            unique_choices.append(choice)
+        index_remap.append(canonical_index)
+
+    if answer_index is not None and 0 <= answer_index < len(index_remap):
+        correct_answer = index_remap[answer_index]
+    elif isinstance(correct_answer, str):
+        canonical_index = canonical_indices.get(correct_answer.strip().casefold())
+        if canonical_index is not None:
+            correct_answer = canonical_index
+    return unique_choices, correct_answer
+
+
+def resolve_answer(correct_answer: Any, choices: list[str], answer_format: str) -> str:
+    answer_index = resolve_answer_index(correct_answer, choices)
+    text = "" if correct_answer is None else str(correct_answer).strip()
     if answer_index is not None and 0 <= answer_index < len(choices):
         return answer_format.format(
             index=answer_index,
@@ -487,8 +531,12 @@ def format_image_path(image_path: Path, jsonl_path: Path, relative: bool) -> str
 
 def make_record(row: dict[str, Any], image_path: Path, jsonl_path: Path, args: argparse.Namespace) -> dict:
     question = str(row.get("question") or "").strip()
-    choices = normalize_choices(row.get("choices"))
-    answer = resolve_answer(row.get("correct_answer"), choices, args.answer_format)
+    choices, correct_answer = deduplicate_choices(
+        normalize_choices(row.get("choices")), row.get("correct_answer")
+    )
+    if not 2 <= len(choices) <= 26:
+        raise ValueError(f"multiple-choice row has {len(choices)} choices; expected 2..26")
+    answer = resolve_answer(correct_answer, choices, args.answer_format)
     choices_text = format_choices(choices, args.choice_format)
     if not question or not choices_text or not answer:
         raise ValueError("question, choices, or correct_answer is empty")
@@ -629,8 +677,13 @@ def convert_split(
                 continue
             try:
                 record = make_record(row, image_path, jsonl_path, args)
-            except ValueError:
+            except ValueError as error:
                 stats.skipped_invalid_text += 1
+                if args.invalid_text_policy == "error":
+                    raise ValueError(
+                        f"Invalid text for split={split_info.name} row={stats.read_rows} "
+                        f"id={row.get('id')!r}: {error}"
+                    ) from error
                 continue
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             stats.written_rows += 1
@@ -709,6 +762,7 @@ def main() -> None:
         "dataset_mode": args.dataset_mode,
         "choice_format": args.choice_format,
         "answer_format": args.answer_format,
+        "invalid_text_policy": args.invalid_text_policy,
         "reuse_existing_images": args.reuse_existing_images,
         "validate_reused_images": args.validate_reused_images,
         "required_fields": list(REQUIRED_FIELDS),

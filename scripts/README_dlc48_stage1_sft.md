@@ -1,4 +1,4 @@
-# Stage 1 DLC 48 卡全量 SFT 抽检与训练说明
+# Stage 1 DLC 48 卡（3 节点 × 16 卡）全量 SFT 抽检与训练说明
 
 本次训练使用 `dlc_ready_entrypoints.stage1.json` 中启用的 16 个数据集，
 不使用任何 `*_global_train.jsonl`。最终 ready 入口已删除精确重复行和非法
@@ -10,8 +10,8 @@
 去污染和全量抽检完成后运行：
 
 ```bash
-python3 /mnt/workspace/stage1/scripts/validate_sft_entrypoints.py \
-  --manifest /mnt/workspace/stage1/scripts/dlc_ready_entrypoints.stage1.json
+python3 /mnt/luojunkun/stage1/sft-model/scripts/validate_sft_entrypoints.py \
+  --manifest /mnt/luojunkun/stage1/sft-model/scripts/dlc_ready_entrypoints.stage1.json
 
 python3 - <<'PY'
 import json
@@ -110,20 +110,33 @@ BLAKE2b 哈希做确定性 bottom-k 抽样。每个 grounding 数据集和 split
 - `/mnt/luojunkun/stage1/dataset_ms-swift/dlc_sft_audit_report.json`
 - `/mnt/luojunkun/stage1/dataset_ms-swift/dlc_sft_audit_visualizations/`
 
+## 持久化文件位置
+
+`/mnt/workspace/stage1/scripts` 是临时工作区，正式训练不要依赖该目录。当前已将
+训练入口、manifest 和门禁脚本同步到持久化目录：
+
+- 训练相关脚本和 manifest：`/mnt/luojunkun/stage1/sft-model/scripts/`
+- 模型输出和 smoke test 输出：`/mnt/luojunkun/stage1/sft-model/`
+- 转换后的 ms-swift 数据、去污染报告和抽检可视化：`/mnt/luojunkun/stage1/dataset_ms-swift/`
+
+其中 `dlc_ready_entrypoints.stage1.json` 可以从临时工作区迁移到持久化目录使用；
+校验只允许 manifest 路径变化，文件内容 SHA256 必须与去污染报告记录一致。
+
 ## DLC 正式启动命令
 
-DLC 任务使用 6 个节点，每个节点 8 张 GPU。DLC 会注入 `WORLD_SIZE`、`RANK` 和
-`MASTER_ADDR`。在任务命令中设置共享模型权重和输出目录：
+DLC 任务使用 3 个节点，每个节点 16 张 GPU，总计 48 卡。DLC 会注入
+`WORLD_SIZE`、`RANK` 和 `MASTER_ADDR`。在任务命令中设置共享模型权重和输出目录：
 
 ```bash
 export MODEL_PATH=/shared/path/to/Qwen3-VL-4B-Instruct-or-your-full-checkpoint
-export OUTPUT_DIR=/mnt/luojunkun/stage1/sft-model/qwen3-vl-stage1-dlc48-full
-bash /mnt/workspace/stage1/scripts/run_dlc_48card_full_sft.sh
+export OUTPUT_DIR=/mnt/luojunkun/stage1/sft-model/qwen3-vl-stage1-dlc3x16-full
+export EXPECTED_NNODES=3 NPROC_PER_NODE=16 EXPECTED_WORLD_SIZE=48
+bash /mnt/luojunkun/stage1/sft-model/scripts/run_dlc_48card_full_sft.sh
 ```
 
 默认参数为：全参数 BF16、ZeRO-3、8 路 sequence parallel、最大长度 65,536、
-训练 1 个 epoch，有效全局 batch size 为 24，即 6 个 data-parallel group ×
-micro-batch 1 × gradient accumulation 4。可通过
+训练 1 个 epoch，有效全局 batch size 为 24，即 48 卡 / 8 路 sequence parallel =
+6 个 data-parallel group，乘以 micro-batch 1 和 gradient accumulation 4。可通过
 `GRADIENT_ACCUMULATION_STEPS` 调整全局 batch size。
 
 VideoTrack 标签最多覆盖 128 个源视频帧，转换后视频帧率包括 6、12、20 和 25 FPS。
@@ -143,9 +156,10 @@ processor 测量 token 长度前直接降低。`truncation_strategy=right` 可�
 ```bash
 export WORLD_SIZE=1 RANK=0 MASTER_ADDR=127.0.0.1 MASTER_PORT=29500
 export MODEL_PATH=/shared/path/to/model
-export EXPECTED_WORLD_SIZE=8 MAX_STEPS=2 SAVE_STEPS=2
-export OUTPUT_DIR=/mnt/luojunkun/stage1/sft-model/dlc48-preflight-smoke
-bash /mnt/workspace/stage1/scripts/run_dlc_48card_full_sft.sh
+export EXPECTED_NNODES=1 NPROC_PER_NODE=8 EXPECTED_WORLD_SIZE=8
+export MAX_STEPS=2 SAVE_STEPS=2
+export OUTPUT_DIR=/mnt/luojunkun/stage1/sft-model/dlc3x16-preflight-smoke
+bash /mnt/luojunkun/stage1/sft-model/scripts/run_dlc_48card_full_sft.sh
 ```
 
 必须在正式 DLC 训练镜像中运行，不能使用当前数据处理容器作为训练启动验证依据。

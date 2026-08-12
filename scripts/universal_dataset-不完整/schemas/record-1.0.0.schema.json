@@ -1,0 +1,720 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:stage1:s1-udf:record:1.0.0",
+  "title": "Stage1 Universal Dataset Format record",
+  "type": "object",
+  "required": ["format", "schema_version", "id", "group_id"],
+  "properties": {
+    "format": {"const": "s1-udf"},
+    "schema_version": {"const": "1.0.0"},
+    "id": {"$ref": "#/$defs/nonEmptyString"},
+    "group_id": {"$ref": "#/$defs/nonEmptyString"},
+    "split": {"type": "string", "minLength": 1},
+    "task_types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/asset"}
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/entity"}
+    },
+    "regions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/region"}
+    },
+    "relations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/relation"}
+    },
+    "tracks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/track"}
+    },
+    "conversations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/conversation"}
+    },
+    "annotations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/annotation"}
+    },
+    "episode": {"$ref": "#/$defs/episode"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "metadata": {"type": "object"},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "anyOf": [
+    {"required": ["assets"]},
+    {"required": ["conversations"]},
+    {"required": ["annotations"]},
+    {"required": ["episode"]},
+    {"required": ["entities"]},
+    {"required": ["regions"]},
+    {"required": ["tracks"]}
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "numberArray": {
+      "type": "array",
+      "items": {"type": "number"}
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z0-9_.-]+$"}
+    },
+    "timeSpan": {
+      "type": "object",
+      "properties": {
+        "start": {"type": "number"},
+        "end": {"type": "number"},
+        "unit": {"enum": ["second", "millisecond", "microsecond", "nanosecond", "frame", "step", "pts"]},
+        "reference_asset_id": {"type": "string"},
+        "reference": {"type": "string"},
+        "time_base": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "integer"},
+            {"type": "integer", "not": {"const": 0}}
+          ],
+          "items": false
+        }
+      },
+      "required": ["start", "end", "unit"],
+      "additionalProperties": false
+    },
+    "dataRef": {
+      "type": "object",
+      "properties": {
+        "uri": {"$ref": "#/$defs/nonEmptyString"},
+        "format": {"type": "string"},
+        "key": {"type": ["string", "integer"]},
+        "offset": {"type": "integer", "minimum": 0},
+        "length": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "compression": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "required": ["uri"],
+      "additionalProperties": false
+    },
+    "tensor": {
+      "type": "object",
+      "properties": {
+        "dtype": {"$ref": "#/$defs/nonEmptyString"},
+        "shape": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": -1}
+        },
+        "data": {},
+        "ref": {"$ref": "#/$defs/dataRef"},
+        "unit": {"type": "string"},
+        "encoding": {"type": "string"},
+        "labels": {"type": "array", "items": {"type": "string"}},
+        "metadata": {"type": "object"}
+      },
+      "required": ["dtype", "shape"],
+      "oneOf": [
+        {"required": ["data"]},
+        {"required": ["ref"]}
+      ],
+      "additionalProperties": false
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "mime_type": {"type": "string"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "channels": {"type": "integer", "minimum": 1},
+        "duration": {"type": "number", "minimum": 0},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "frame_count": {"type": "integer", "minimum": 0},
+        "sample_rate": {"type": "number", "exclusiveMinimum": 0},
+        "point_count": {"type": "integer", "minimum": 0},
+        "time_base": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "integer"},
+            {"type": "integer", "not": {"const": 0}}
+          ],
+          "items": false
+        },
+        "start_pts": {"type": "integer"},
+        "duration_pts": {"type": "integer", "minimum": 0},
+        "document_id": {"type": ["string", "integer"]},
+        "page_index": {"type": "integer", "minimum": 0},
+        "sensor_channel": {"type": "string"},
+        "depth_scale": {"type": "number", "exclusiveMinimum": 0},
+        "invalid_value": {},
+        "encoding": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "kind", "uri"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "kind": {
+          "enum": [
+            "image", "video", "audio", "text", "document", "depth", "mask",
+            "point_cloud", "mesh", "tensor", "table", "archive", "other"
+          ]
+        },
+        "uri": {"$ref": "#/$defs/nonEmptyString"},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "media": {"$ref": "#/$defs/media"},
+        "sensor_id": {"type": "string"},
+        "frame_id": {"type": "string"},
+        "time_span": {"$ref": "#/$defs/timeSpan"},
+        "source_ref": {"$ref": "#/$defs/dataRef"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "label": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "id": {"type": ["string", "integer"]},
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "taxonomy": {"type": "string"},
+        "score": {"type": "number"},
+        "synonyms": {"type": "array", "items": {"type": "string"}},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "entity": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "display_name": {"type": "string"},
+        "labels": {"type": "array", "items": {"$ref": "#/$defs/label"}},
+        "attributes": {"type": "object"},
+        "is_crowd": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "source_id": {"type": ["string", "integer"]},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "coordinateSpace": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "pixel", "normalized", "percent", "camera", "sensor", "lidar", "ego",
+            "global", "world", "robot", "map", "voxel", "document", "video", "clip", "custom"
+          ]
+        },
+        "frame_id": {"type": "string"},
+        "unit": {"type": "string"},
+        "axes": {"type": "array", "items": {"type": "string"}},
+        "origin": {"type": "string"},
+        "index_base": {"type": "integer"},
+        "handedness": {"enum": ["left", "right"]},
+        "scale": {"type": "number", "exclusiveMinimum": 0},
+        "image_size": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "integer", "minimum": 1},
+            {"type": "integer", "minimum": 1}
+          ],
+          "items": false
+        },
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "geometry": {
+      "type": "object",
+      "required": ["type", "coordinate_space"],
+      "properties": {
+        "type": {
+          "enum": [
+            "point2d", "bbox2d", "polygon2d", "polyline2d", "rle", "mask_ref",
+            "keypoints2d", "point3d", "bbox3d", "cuboid3d", "pose3d", "point_set", "custom"
+          ]
+        },
+        "format": {"type": "string"},
+        "coordinates": {},
+        "visibility": {"type": "array", "items": {"type": ["integer", "number", "boolean"]}},
+        "size": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "counts": {"type": ["string", "array"]},
+        "asset_ref": {"type": "string"},
+        "dimension_order": {"type": "array", "items": {"type": "string"}},
+        "rotation_convention": {"type": "string"},
+        "coordinate_space": {"$ref": "#/$defs/coordinateSpace"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "region": {
+      "type": "object",
+      "required": ["id", "asset_id", "geometry"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "asset_id": {"$ref": "#/$defs/nonEmptyString"},
+        "entity_id": {"type": "string"},
+        "geometry": {"$ref": "#/$defs/geometry"},
+        "frame_index": {"type": "integer", "minimum": 0},
+        "time_span": {"$ref": "#/$defs/timeSpan"},
+        "area": {"type": "number", "minimum": 0},
+        "confidence": {"type": "number"},
+        "occluded": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "nodeRef": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "entity_id": {"type": "string"},
+        "region_id": {"type": "string"},
+        "track_id": {"type": "string"},
+        "asset_id": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "relation": {
+      "type": "object",
+      "required": ["id", "subject", "predicate", "object"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "subject": {"$ref": "#/$defs/nodeRef"},
+        "predicate": {"$ref": "#/$defs/nonEmptyString"},
+        "object": {"$ref": "#/$defs/nodeRef"},
+        "time_span": {"$ref": "#/$defs/timeSpan"},
+        "confidence": {"type": "number"},
+        "attributes": {"type": "object"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "trackObservation": {
+      "type": "object",
+      "properties": {
+        "region_id": {"$ref": "#/$defs/nonEmptyString"},
+        "frame_index": {"type": "integer", "minimum": 0},
+        "timestamp": {"type": "number"},
+        "visibility": {"type": "number"},
+        "state": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "anyOf": [
+        {"required": ["frame_index"]},
+        {"required": ["timestamp"]}
+      ],
+      "allOf": [
+        {
+          "anyOf": [
+            {"required": ["region_id"]},
+            {"required": ["state"]}
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "track": {
+      "type": "object",
+      "required": ["id", "asset_id", "observations"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "asset_id": {"$ref": "#/$defs/nonEmptyString"},
+        "entity_id": {"type": "string"},
+        "observations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/trackObservation"}
+        },
+        "attributes": {"type": "object"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "contentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": {"const": "text"},
+            "text": {"type": "string"},
+            "language": {"type": "string"},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "asset_id"],
+          "properties": {
+            "type": {"const": "asset"},
+            "asset_id": {"$ref": "#/$defs/nonEmptyString"},
+            "time_span": {"$ref": "#/$defs/timeSpan"},
+            "frame_index": {"type": "integer", "minimum": 0},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "entity_id"],
+          "properties": {
+            "type": {"const": "entity"},
+            "entity_id": {"$ref": "#/$defs/nonEmptyString"},
+            "surface": {"type": "string"},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "region_id"],
+          "properties": {
+            "type": {"const": "region"},
+            "region_id": {"$ref": "#/$defs/nonEmptyString"},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "name", "arguments"],
+          "properties": {
+            "type": {"const": "tool_call"},
+            "id": {"type": "string"},
+            "name": {"$ref": "#/$defs/nonEmptyString"},
+            "arguments": {},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "result"],
+          "properties": {
+            "type": {"const": "tool_result"},
+            "tool_call_id": {"type": "string"},
+            "result": {},
+            "is_error": {"type": "boolean"},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "name", "value"],
+          "properties": {
+            "type": {"const": "custom"},
+            "name": {"$ref": "#/$defs/nonEmptyString"},
+            "value": {},
+            "metadata": {"type": "object"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["content"],
+      "properties": {
+        "id": {"type": "string"},
+        "content": {"type": "array", "items": {"$ref": "#/$defs/contentPart"}},
+        "rank": {"type": "integer", "minimum": 0},
+        "score": {"type": "number"},
+        "label": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "id": {"type": "string"},
+        "role": {"enum": ["system", "user", "assistant", "tool", "environment"]},
+        "name": {"type": "string"},
+        "content": {"type": "array", "items": {"$ref": "#/$defs/contentPart"}},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "weight": {"type": "number"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "conversation": {
+      "type": "object",
+      "required": ["id", "messages"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "messages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/message"}},
+        "language": {"type": "string"},
+        "task": {"type": "string"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string"},
+        "content": {"type": "array", "items": {"$ref": "#/$defs/contentPart"}},
+        "score": {"type": "number"},
+        "count": {"type": "integer", "minimum": 0},
+        "annotator_id": {"type": "string"},
+        "confidence": {"type": ["string", "number"]},
+        "weight": {"type": "number"},
+        "metadata": {"type": "object"}
+      },
+      "oneOf": [
+        {"required": ["text"]},
+        {"required": ["content"]}
+      ],
+      "additionalProperties": false
+    },
+    "annotation": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"$ref": "#/$defs/nonEmptyString"},
+        "target": {"$ref": "#/$defs/nodeRef"},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/nodeRef"}},
+        "text": {"type": "string"},
+        "language": {"type": "string"},
+        "question": {
+          "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"$ref": "#/$defs/contentPart"}}
+          ]
+        },
+        "answers": {"type": "array", "items": {"$ref": "#/$defs/answer"}},
+        "answer_mode": {"enum": ["open", "multiple_choice"]},
+        "choices": {"type": "array", "items": {"type": "string"}},
+        "correct_choice_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "canonical_answer_index": {"type": "integer", "minimum": 0},
+        "question_type": {"type": "string"},
+        "reasoning_program": {},
+        "evidence": {"type": "array", "items": {"type": "object"}},
+        "label_ids": {"type": "array", "items": {"type": ["string", "integer"]}},
+        "entity_ids": {"type": "array", "items": {"type": "string"}},
+        "region_ids": {"type": "array", "items": {"type": "string"}},
+        "relation_ids": {"type": "array", "items": {"type": "string"}},
+        "track_ids": {"type": "array", "items": {"type": "string"}},
+        "time_span": {"$ref": "#/$defs/timeSpan"},
+        "value": {},
+        "unit": {"type": "string"},
+        "confidence": {"type": "number"},
+        "annotator": {"type": "object"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "translation": {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}],
+          "items": false
+        },
+        "quaternion_xyzw": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "number"}, {"type": "number"}, {"type": "number"}, {"type": "number"}
+          ],
+          "items": false
+        },
+        "quaternion_wxyz": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "number"}, {"type": "number"}, {"type": "number"}, {"type": "number"}
+          ],
+          "items": false
+        },
+        "matrix": {
+          "type": "array",
+          "items": {"type": "array", "items": {"type": "number"}}
+        },
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "coordinateFrame": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {"type": "string"},
+        "transform_to_parent": {"$ref": "#/$defs/transform"},
+        "convention": {"type": "string"},
+        "unit": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "sensor": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"$ref": "#/$defs/nonEmptyString"},
+        "frame_id": {"type": "string"},
+        "rate_hz": {"type": "number", "exclusiveMinimum": 0},
+        "intrinsics": {"$ref": "#/$defs/tensor"},
+        "extrinsics": {"$ref": "#/$defs/transform"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "observation": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "sensor_id": {"type": "string"},
+        "asset_id": {"type": "string"},
+        "value": {},
+        "tensor": {"$ref": "#/$defs/tensor"},
+        "frame_id": {"type": "string"},
+        "timestamp": {"type": "number"},
+        "unit": {"type": "string"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "oneOf": [
+        {"required": ["asset_id"]},
+        {"required": ["value"]},
+        {"required": ["tensor"]}
+      ],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "value": {},
+        "tensor": {"$ref": "#/$defs/tensor"},
+        "space": {"type": "string"},
+        "frame_id": {"type": "string"},
+        "unit": {"type": "string"},
+        "target": {"$ref": "#/$defs/nodeRef"},
+        "language": {"type": "string"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "anyOf": [
+        {"required": ["value"]},
+        {"required": ["tensor"]},
+        {"required": ["language"]}
+      ],
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "timestamp": {"type": "number"},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+        "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}},
+        "state": {"type": "object"},
+        "reward": {"type": "number"},
+        "discount": {"type": "number"},
+        "is_first": {"type": "boolean"},
+        "is_last": {"type": "boolean"},
+        "is_terminal": {"type": "boolean"},
+        "language_instruction": {"type": "string"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    },
+    "episode": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "task": {"type": "object"},
+        "environment": {"type": "object"},
+        "agent": {"type": "object"},
+        "coordinate_frames": {"type": "array", "items": {"$ref": "#/$defs/coordinateFrame"}},
+        "sensors": {"type": "array", "items": {"$ref": "#/$defs/sensor"}},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/step"}},
+        "steps_ref": {"$ref": "#/$defs/dataRef"},
+        "step_count": {"type": "integer", "minimum": 0},
+        "success": {"type": "boolean"},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "oneOf": [
+        {"required": ["steps"]},
+        {"required": ["steps_ref", "step_count"]}
+      ],
+      "additionalProperties": false
+    },
+    "conversion": {
+      "type": "object",
+      "required": ["tool", "version"],
+      "properties": {
+        "tool": {"$ref": "#/$defs/nonEmptyString"},
+        "version": {"$ref": "#/$defs/nonEmptyString"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "arguments": {"type": "object"},
+        "code_revision": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "dataset": {"type": "string"},
+        "dataset_version": {"type": "string"},
+        "source_split": {"type": "string"},
+        "source_record_id": {"type": ["string", "integer"]},
+        "source_uri": {"type": "string"},
+        "source_files": {"type": "array", "items": {"$ref": "#/$defs/dataRef"}},
+        "license": {"type": "string"},
+        "revision": {"type": "string"},
+        "conversion": {"$ref": "#/$defs/conversion"},
+        "raw_ref": {"$ref": "#/$defs/dataRef"},
+        "raw_record": {},
+        "metadata": {"type": "object"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

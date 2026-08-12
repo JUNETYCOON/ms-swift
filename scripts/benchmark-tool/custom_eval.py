@@ -32,6 +32,10 @@ PLAIN_BOX_RE = re.compile(rf'^\s*[\[(]\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*,\s
 ANSWER_RE = re.compile(r'<answer>(.*?)</answer>', re.DOTALL | re.IGNORECASE)
 THINK_END_RE = re.compile(r'</think>', re.IGNORECASE)
 YES_NO_RE = re.compile(r'(?<![\w])(?:yes|no)(?![\w])', re.IGNORECASE)
+MCQ_CHOICE_LINE_RE = re.compile(r'^\s*([A-Z])[.)]\s+(.+?)\s*$', re.IGNORECASE)
+MCQ_LABEL_ONLY_RE = re.compile(r'^\s*([A-Z])[.)]?\s*$', re.IGNORECASE)
+MCQ_ANSWER_PREFIX_RE = re.compile(
+    r'^\s*(?:the\s+)?(?:answer|option|choice)\s*(?:is\s*|:\s*)', re.IGNORECASE)
 DESCRIPTION_TOKEN_RE = re.compile(
     r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[\u3040-\u30ff]|[^\W_]+(?:[\'’.-][^\W_]+)*',
     re.UNICODE)
@@ -363,6 +367,97 @@ def first_explicit_yes_no(value: Any) -> Optional[str]:
     return match.group(0).casefold() if match else None
 
 
+def _multiple_choice_options(question: Any, references: Sequence[str]) -> Tuple[Dict[str, str], bool]:
+    options: Dict[str, str] = {}
+    question_options: Dict[str, str] = {}
+    for line in final_answer_text(str(question or '')).splitlines():
+        match = MCQ_CHOICE_LINE_RE.fullmatch(line)
+        if not match:
+            continue
+        label, text = match.groups()
+        label = label.upper()
+        if text.startswith(('[', '(')) and text.endswith((']', ')')):
+            continue
+        question_options[label] = text
+    expected = [chr(ord('A') + index) for index in range(len(question_options))]
+    has_question_choices = len(question_options) >= 2 and list(question_options) == expected
+    if has_question_choices:
+        options.update(question_options)
+    has_labeled_reference = False
+    for reference in references:
+        match = MCQ_CHOICE_LINE_RE.fullmatch(final_answer_text(str(reference)).strip())
+        if not match:
+            continue
+        has_labeled_reference = True
+        label, text = match.groups()
+        label = label.upper()
+        options.setdefault(label, text)
+    return options, has_question_choices or has_labeled_reference
+
+
+def _multiple_choice_label(value: Any, options: Mapping[str, str]) -> Optional[str]:
+    text = final_answer_text(str(value or '')).strip()
+    text = MCQ_ANSWER_PREFIX_RE.sub('', text, count=1).strip()
+    label: Optional[str] = None
+    answer_text = text
+    direct = MCQ_CHOICE_LINE_RE.fullmatch(text)
+    if direct:
+        label, answer_text = direct.groups()
+        label = label.upper()
+    elif label_only := MCQ_LABEL_ONLY_RE.fullmatch(text):
+        label = label_only.group(1).upper()
+        answer_text = ''
+    normalized_text = normalize_vqa_answer(answer_text) if answer_text else ''
+    text_labels = {
+        candidate
+        for candidate, choice in options.items()
+        if normalized_text and normalized_text == normalize_vqa_answer(choice)
+    }
+    if label is not None and label not in options:
+        return None
+    if label is not None and text_labels and label not in text_labels:
+        return None
+    if label is not None:
+        return label
+    if len(text_labels) == 1:
+        return next(iter(text_labels))
+    return None
+
+
+def _multiple_choice_scores(
+    prediction: str,
+    references: Sequence[str],
+    question: Any,
+) -> Optional[Dict[str, Any]]:
+    options, is_multiple_choice = _multiple_choice_options(question, references)
+    if not is_multiple_choice or not options:
+        return None
+    reference_labels = [_multiple_choice_label(reference, options) for reference in references]
+    if any(label is None for label in reference_labels):
+        return None
+    prediction_label = _multiple_choice_label(prediction, options)
+    matches = sum(prediction_label == label for label in reference_labels)
+    soft_accuracy = float(matches > 0) if len(references) == 1 else min(1.0, matches / 3.0)
+    normalized_prediction = normalize_vqa_answer(prediction)
+    normalized_references = [normalize_vqa_answer(value) for value in references]
+    token_f1 = (
+        1.0
+        if matches
+        else max(
+            (_token_f1(normalized_prediction, value) for value in normalized_references),
+            default=0.0,
+        )
+    )
+    return {
+        'exact_match': float(any(prediction.strip() == value.strip() for value in references)),
+        'vqa_accuracy': soft_accuracy,
+        'token_f1': token_f1,
+        'answer_type': 'multiple_choice',
+        'answer_accuracy': float(matches > 0),
+        'semantic_similarity': float(matches > 0),
+    }
+
+
 def semantic_answer_similarity(prediction: str, references: Sequence[str]) -> float:
     """Score short free-form answers with an offline, RoboVQA-oriented similarity proxy."""
     prediction = final_answer_text(prediction)
@@ -372,11 +467,18 @@ def semantic_answer_similarity(prediction: str, references: Sequence[str]) -> fl
     return max((_semantic_pair_similarity(prediction, reference) for reference in references), default=0.0)
 
 
-def vqa_scores(prediction: str, references: Sequence[str]) -> Dict[str, Any]:
+def vqa_scores(
+    prediction: str,
+    references: Sequence[str],
+    question: Any = None,
+) -> Dict[str, Any]:
     references = [str(value) for value in references if value is not None]
     if not references:
         raise ValueError('VQA sample has no reference answer.')
     prediction = final_answer_text(prediction)
+    choice_scores = _multiple_choice_scores(prediction, references, question)
+    if choice_scores is not None:
+        return choice_scores
     normalized_prediction = normalize_vqa_answer(prediction)
     normalized_references = [normalize_vqa_answer(value) for value in references]
     matches = sum(normalized_prediction == value for value in normalized_references)
@@ -659,7 +761,7 @@ def _restore_accumulator(paths: Mapping[str, Path], accumulator: ScoreAccumulato
         references = json.loads(row.get('reference') or '[]')
         if not isinstance(references, list):
             references = [references]
-        row.update(vqa_scores(row.get('prediction', ''), references))
+        row.update(vqa_scores(row.get('prediction', ''), references, row.get('question', '')))
     if config.retry_errors and any(row.get('error') for row in result_rows):
         result_rows = _remove_failed_rows(paths, result_rows)
 
@@ -675,7 +777,10 @@ def _restore_accumulator(paths: Mapping[str, Path], accumulator: ScoreAccumulato
             references = json.loads(row.get('reference') or '[]')
             if not isinstance(references, list):
                 references = [references]
-            accumulator.add_vqa(vqa_scores(row.get('prediction', ''), references), failed=failed)
+            accumulator.add_vqa(
+                vqa_scores(row.get('prediction', ''), references, row.get('question', '')),
+                failed=failed,
+            )
         elif task == 'description':
             accumulator.add_description({
                 'token_f1': float(row['token_f1']),
@@ -868,7 +973,7 @@ def _process_batch(samples: Sequence[PreparedSample], model: Any, processor: Any
             'error': error,
         }
         if sample.task == 'vqa':
-            scores = vqa_scores(prediction, sample.references)
+            scores = vqa_scores(prediction, sample.references, sample.question)
             row.update(scores)
             accumulator.add_vqa(scores, failed=bool(error))
         elif sample.task == 'description':

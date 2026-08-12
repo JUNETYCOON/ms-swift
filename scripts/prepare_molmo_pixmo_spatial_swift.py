@@ -90,6 +90,7 @@ class RowGroupTask:
     ordinal: int
     row_limit: int | None
     fragment_dir: str
+    forced_split: str | None = None
 
 
 @dataclass
@@ -109,12 +110,20 @@ class ConvertedSample:
     record: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class TrackMediaEntry:
+    windows: tuple[dict[str, Any], ...]
+    source_video_id: str | None = None
+    lineage_key: str | None = None
+
+
 _RUNTIME: RuntimeConfig | None = None
 _VIDEO_URLS: dict[str, str] = {}
 _GENERATED_VIDEOS: dict[str, str] = {}
-_TRACK_VIDEOS: dict[str, list[dict[str, Any]]] = {}
+_TRACK_VIDEOS: dict[str, TrackMediaEntry] = {}
 _PIXMO_POINT_GROUPS: dict[str, str] = {}
 _PIXMO_URL_GROUPS: dict[str, str] = {}
+_SPATIALVLM_TEST_MEDIA_KEYS: set[str] = set()
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -167,6 +176,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="JSON mapping dataset::clip (or row id) to one or more declared pre-cropped windows.",
+    )
+    parser.add_argument(
+        "--video-track-sources",
+        nargs="+",
+        default=None,
+        metavar="SOURCE",
+        help="Only convert these Molmo2-VideoTrack data/<source> Parquet groups (case-insensitive).",
     )
     parser.add_argument(
         "--max-track-window-frames",
@@ -226,10 +242,26 @@ def normalize_dataset_selection(values: Sequence[str]) -> list[str]:
     return selected
 
 
+def normalize_video_track_sources(values: Sequence[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+    selected: list[str] = []
+    for raw_value in values:
+        value = raw_value.strip().casefold()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
+            raise SystemExit(f"Invalid --video-track-sources value: {raw_value!r}")
+        if value not in selected:
+            selected.append(value)
+    return selected
+
+
 def validate_args(args: argparse.Namespace) -> None:
     args.datasets = normalize_dataset_selection(args.datasets)
+    args.video_track_sources = normalize_video_track_sources(args.video_track_sources)
     args.input_root = args.input_root.expanduser().resolve()
     args.output_root = args.output_root.expanduser().resolve()
+    if args.video_track_sources and "Molmo2-VideoTrack" not in args.datasets:
+        raise SystemExit("--video-track-sources requires Molmo2-VideoTrack in --datasets")
     if not 0 < args.val_ratio < 1:
         raise SystemExit("--val-ratio must be between 0 and 1")
     if args.num_workers <= 0:
@@ -502,7 +534,14 @@ def load_video_media_index(path: Path | None) -> dict[str, str]:
     return result
 
 
-def load_track_video_index(path: Path | None) -> dict[str, list[dict[str, Any]]]:
+def parse_track_lineage_key(lineage_key: str) -> tuple[str, str]:
+    namespace, separator, source_video_id = lineage_key.partition("::")
+    if not separator or not namespace or not source_video_id:
+        raise ValueError("lineage_key must have the form namespace::source_video_id")
+    return namespace, source_video_id
+
+
+def load_track_video_index(path: Path | None) -> dict[str, TrackMediaEntry]:
     if path is None:
         return {}
     if not path.is_file():
@@ -511,14 +550,52 @@ def load_track_video_index(path: Path | None) -> dict[str, list[dict[str, Any]]]
         raw = json.load(stream)
     if not isinstance(raw, dict):
         raise SystemExit("--video-track-index must contain a JSON object")
-    result: dict[str, list[dict[str, Any]]] = {}
+    result: dict[str, TrackMediaEntry] = {}
     for key, value in raw.items():
         if isinstance(value, dict) and "windows" in value:
             raw_windows = value["windows"]
+            raw_source_video_id = value.get("source_video_id")
+            raw_lineage_key = value.get("lineage_key")
+            has_source_video_id = raw_source_video_id is not None
+            has_lineage_key = raw_lineage_key is not None
+            if has_source_video_id != has_lineage_key:
+                raise SystemExit(
+                    f"VideoTrack index entry {key!r} must declare source_video_id and lineage_key together"
+                )
+            if has_source_video_id:
+                if not isinstance(raw_source_video_id, str) or not raw_source_video_id.strip():
+                    raise SystemExit(f"VideoTrack index entry {key!r} has invalid source_video_id")
+                if not isinstance(raw_lineage_key, str) or not raw_lineage_key.strip():
+                    raise SystemExit(f"VideoTrack index entry {key!r} has invalid lineage_key")
+                source_video_id = raw_source_video_id.strip()
+                lineage_key = raw_lineage_key.strip()
+                try:
+                    _, source_video = parse_track_lineage_key(source_video_id)
+                    _, lineage_video_id = parse_track_lineage_key(lineage_key)
+                except ValueError as exc:
+                    raise SystemExit(f"VideoTrack index entry {key!r} has invalid lineage metadata: {exc}") from exc
+                if lineage_video_id != source_video:
+                    raise SystemExit(
+                        f"VideoTrack index entry {key!r} lineage_key video {lineage_video_id!r} "
+                        f"does not match source_video_id video {source_video!r}"
+                    )
+            else:
+                source_video_id = None
+                lineage_key = None
         elif isinstance(value, list):
             raw_windows = value
+            source_video_id = None
+            lineage_key = None
         else:
+            if isinstance(value, dict) and (
+                "source_video_id" in value or "lineage_key" in value
+            ):
+                raise SystemExit(
+                    f"VideoTrack index entry {key!r} lineage metadata requires a windows list"
+                )
             raw_windows = [value]
+            source_video_id = None
+            lineage_key = None
         if not isinstance(raw_windows, list) or not raw_windows:
             raise SystemExit(f"VideoTrack index entry {key!r} must contain at least one window")
         windows: list[dict[str, Any]] = []
@@ -576,8 +653,19 @@ def load_track_video_index(path: Path | None) -> dict[str, list[dict[str, Any]]]
                     "source_end_frame": source_end,
                 }
             )
-        result[str(key)] = sorted(
-            windows, key=lambda item: (item["source_start_frame"], item["source_end_frame"], item["media"])
+        result[str(key)] = TrackMediaEntry(
+            windows=tuple(
+                sorted(
+                    windows,
+                    key=lambda item: (
+                        item["source_start_frame"],
+                        item["source_end_frame"],
+                        item["media"],
+                    ),
+                )
+            ),
+            source_video_id=source_video_id,
+            lineage_key=lineage_key,
         )
     return result
 
@@ -887,10 +975,25 @@ def resolve_track_windows(row: Mapping[str, Any]) -> tuple[str, list[dict[str, A
     row_id = clean_text(row.get("id"))
     if not dataset or not video_id:
         raise ValueError("video_dataset/video is empty")
-    candidates = tuple(
-        dict.fromkeys(key for key in (f"{dataset}::{clip_id}", row_id, f"{dataset}::{video_id}") if key)
+    specific_candidates = tuple(
+        dict.fromkeys(
+            key
+            for key in (
+                f"{dataset}::{clip_id}" if clip_id else "",
+                row_id,
+            )
+            if key
+        )
     )
-    matches = [(key, _TRACK_VIDEOS[key]) for key in candidates if key in _TRACK_VIDEOS]
+    matches = [
+        (key, _TRACK_VIDEOS[key])
+        for key in specific_candidates
+        if key in _TRACK_VIDEOS
+    ]
+    if not matches:
+        fallback_key = f"{dataset}::{video_id}"
+        if fallback_key in _TRACK_VIDEOS:
+            matches = [(fallback_key, _TRACK_VIDEOS[fallback_key])]
     if not matches:
         raise ValueError(f"unresolved cropped VideoTrack media: {dataset}::{clip_id or video_id}")
     if any(windows != matches[0][1] for _, windows in matches[1:]):
@@ -898,7 +1001,28 @@ def resolve_track_windows(row: Mapping[str, Any]) -> tuple[str, list[dict[str, A
             "conflicting VideoTrack media index aliases: "
             + ", ".join(key for key, _ in matches)
         )
-    indexed_windows = matches[0][1]
+    indexed_entry = matches[0][1]
+    if (indexed_entry.source_video_id is None) != (indexed_entry.lineage_key is None):
+        raise ValueError("VideoTrack media index lineage metadata is incomplete")
+    if indexed_entry.source_video_id is not None:
+        source_dataset, source_video = parse_track_lineage_key(indexed_entry.source_video_id)
+        if source_dataset != dataset or source_video != video_id:
+            raise ValueError(
+                f"VideoTrack index source_video_id {indexed_entry.source_video_id!r} "
+                f"does not match annotation {dataset!r}::{video_id!r}"
+            )
+        assert indexed_entry.lineage_key is not None
+        _, lineage_video_id = parse_track_lineage_key(indexed_entry.lineage_key)
+        if lineage_video_id != source_video:
+            raise ValueError(
+                f"VideoTrack index lineage_key video {lineage_video_id!r} "
+                f"does not match annotation video {source_video!r}"
+            )
+        lineage_key = indexed_entry.lineage_key
+    else:
+        lineage_dataset = "mose-family" if dataset.casefold() in {"mose", "mosev2"} else dataset
+        lineage_key = f"{lineage_dataset}::{video_id}"
+    indexed_windows = indexed_entry.windows
     source_start = strict_int(row.get("start_frame"), "start_frame")
     source_end = strict_int(row.get("end_frame"), "end_frame")
     windows = [
@@ -930,7 +1054,8 @@ def resolve_track_windows(row: Mapping[str, Any]) -> tuple[str, list[dict[str, A
             "VideoTrack media windows do not cover the annotation through source frame "
             f"{source_end}"
         )
-    return f"video:track:{dataset}:{video_id}", windows
+    lineage_dataset, lineage_video_id = parse_track_lineage_key(lineage_key)
+    return f"video:track:{lineage_dataset}:{lineage_video_id}", windows
 
 
 def raw_xy(value: Any) -> tuple[float, float] | None:
@@ -1150,7 +1275,7 @@ def image_suffix(original_path: str, data: bytes) -> str:
     return ".img"
 
 
-def write_embedded_image(image: Any) -> tuple[str, str]:
+def embedded_image_payload(image: Any) -> tuple[str, bytes, str]:
     if not isinstance(image, Mapping):
         raise ValueError("embedded image entry is not an object")
     data = image.get("bytes")
@@ -1159,6 +1284,21 @@ def write_embedded_image(image: Any) -> tuple[str, str]:
     payload = bytes(data)
     digest = hashlib.sha256(payload).hexdigest()
     original_path = clean_text(image.get("path"))
+    return digest, payload, original_path
+
+
+def spatialvlm_media_key(images: Any) -> str:
+    raw_images = ensure_list(images)
+    if len(raw_images) != 1:
+        raise ValueError(
+            "SpatialVLM multi-image rows are not supported until bbox image_id mapping is available"
+        )
+    digests = [embedded_image_payload(image)[0] for image in raw_images]
+    return "image:sha256:" + "+".join(digests)
+
+
+def write_embedded_image(image: Any) -> tuple[str, str]:
+    digest, payload, original_path = embedded_image_payload(image)
     if _RUNTIME is None:
         raise RuntimeError("worker runtime is not initialized")
     images_dir = Path(_RUNTIME.output_root) / "spatialvlm" / "images"
@@ -1401,7 +1541,18 @@ def process_row_group(task: RowGroupTask) -> WorkerResult:
                 counters["expanded_rows"] += len(samples) - 1
             for derived_index, sample in enumerate(samples):
                 try:
-                    split = split_for_media(sample.media_key, _RUNTIME.seed, _RUNTIME.val_ratio)
+                    if (
+                        task.dataset == "spatialvlm"
+                        and task.forced_split == "train"
+                        and sample.media_key in _SPATIALVLM_TEST_MEDIA_KEYS
+                    ):
+                        counters["excluded_train_records_with_test_image_hash"] += 1
+                        continue
+                    split = task.forced_split or split_for_media(
+                        sample.media_key, _RUNTIME.seed, _RUNTIME.val_ratio
+                    )
+                    if split not in {"train", "val"}:
+                        raise AssertionError(f"invalid forced split: {split}")
                     validate_record(sample.record)
                     update_record_counters(sample.record, counters)
                     previous = local_groups.setdefault(sample.media_key, split)
@@ -1410,6 +1561,11 @@ def process_row_group(task: RowGroupTask) -> WorkerResult:
                     stream = val_stream if split == "val" else train_stream
                     stream.write(json.dumps(sample.record, ensure_ascii=False, separators=(",", ":")) + "\n")
                     counters[f"written_{split}"] += 1
+                    if task.dataset == "spatialvlm" and task.forced_split:
+                        official_source = "test" if task.forced_split == "val" else "train"
+                        counters[
+                            f"official_{official_source}_records_written_to_{split}"
+                        ] += 1
                 except Exception as exc:
                     row_had_rejection = True
                     counters["rejected_derived_records"] += 1
@@ -1440,7 +1596,11 @@ def process_row_group(task: RowGroupTask) -> WorkerResult:
     )
 
 
-def discover_sources(dataset: str, input_root: Path) -> list[Path]:
+def discover_sources(
+    dataset: str,
+    input_root: Path,
+    video_track_sources: Sequence[str] | None = None,
+) -> list[Path]:
     root = input_root / dataset
     if not root.is_dir():
         raise SystemExit(f"Dataset directory does not exist: {root}")
@@ -1454,11 +1614,66 @@ def discover_sources(dataset: str, input_root: Path) -> list[Path]:
         sources = sorted((root / "data").glob("*.parquet"))
     elif dataset == "Molmo2-VideoTrack":
         sources = sorted(root.rglob("*.parquet"))
+        if video_track_sources:
+            data_root = root / "data"
+            sources_by_group: dict[str, list[Path]] = {}
+            for source in sources:
+                try:
+                    relative = source.relative_to(data_root)
+                except ValueError:
+                    continue
+                if len(relative.parts) < 2:
+                    continue
+                sources_by_group.setdefault(relative.parts[0].casefold(), []).append(source)
+            missing = sorted(set(video_track_sources) - sources_by_group.keys())
+            if missing:
+                available = ", ".join(sorted(sources_by_group)) or "none"
+                raise SystemExit(
+                    f"Unknown or unavailable Molmo2-VideoTrack source(s): {', '.join(missing)}. "
+                    f"Available sources: {available}"
+                )
+            selected_groups = set(video_track_sources)
+            sources = sorted(
+                source
+                for group, group_sources in sources_by_group.items()
+                if group in selected_groups
+                for source in group_sources
+            )
     else:
         sources = []
     if not sources:
         raise SystemExit(f"No authoritative parquet sources found for {dataset} below {root}")
     return sources
+
+
+def spatialvlm_official_split(source: Path) -> str:
+    name = source.name.casefold()
+    if name.startswith("train-"):
+        return "train"
+    if name.startswith(("test-", "validation-", "val-")):
+        return "val"
+    raise ValueError(
+        f"SpatialVLM parquet filename does not declare an official split: {source.name}"
+    )
+
+
+def build_spatialvlm_test_media_keys(sources: Sequence[Path]) -> tuple[set[str], int]:
+    pq = import_pyarrow_parquet()
+    media_keys: set[str] = set()
+    source_rows = 0
+    for source in sources:
+        if spatialvlm_official_split(source) != "val":
+            continue
+        parquet = pq.ParquetFile(source)
+        if "images" not in parquet.schema_arrow.names:
+            raise ValueError(f"SpatialVLM test source has no images column: {source}")
+        for batch in parquet.iter_batches(batch_size=128, columns=["images"]):
+            for row in batch.to_pylist():
+                source_rows += 1
+                media_keys.add(spatialvlm_media_key(row.get("images")))
+    if not source_rows:
+        raise ValueError("SpatialVLM has no official test rows to reserve")
+    return media_keys, source_rows
 
 
 def required_columns(dataset: str, source: Path) -> set[str]:
@@ -1530,6 +1745,11 @@ def build_tasks(
                     ordinal=ordinal,
                     row_limit=row_limit,
                     fragment_dir=str(fragment_dir),
+                    forced_split=(
+                        spatialvlm_official_split(source)
+                        if dataset == "spatialvlm"
+                        else None
+                    ),
                 )
             )
             total_source_rows += row_count if row_limit is None else row_limit
@@ -1545,18 +1765,20 @@ def initialize_worker(
     runtime: RuntimeConfig,
     video_urls: dict[str, str],
     generated_videos: dict[str, str],
-    track_videos: dict[str, list[dict[str, Any]]],
+    track_videos: dict[str, TrackMediaEntry],
     pixmo_point_groups: dict[str, str],
     pixmo_url_groups: dict[str, str],
+    spatialvlm_test_media_keys: set[str],
 ) -> None:
     global _RUNTIME, _VIDEO_URLS, _GENERATED_VIDEOS, _TRACK_VIDEOS
-    global _PIXMO_POINT_GROUPS, _PIXMO_URL_GROUPS
+    global _PIXMO_POINT_GROUPS, _PIXMO_URL_GROUPS, _SPATIALVLM_TEST_MEDIA_KEYS
     _RUNTIME = runtime
     _VIDEO_URLS = video_urls
     _GENERATED_VIDEOS = generated_videos
     _TRACK_VIDEOS = track_videos
     _PIXMO_POINT_GROUPS = pixmo_point_groups
     _PIXMO_URL_GROUPS = pixmo_url_groups
+    _SPATIALVLM_TEST_MEDIA_KEYS = spatialvlm_test_media_keys
 
 
 def run_tasks(tasks: Sequence[RowGroupTask], workers: int) -> list[WorkerResult]:
@@ -1574,6 +1796,7 @@ def run_tasks(tasks: Sequence[RowGroupTask], workers: int) -> list[WorkerResult]
             _TRACK_VIDEOS,
             _PIXMO_POINT_GROUPS,
             _PIXMO_URL_GROUPS,
+            _SPATIALVLM_TEST_MEDIA_KEYS,
         ),
     }
     if os.name == "posix":
@@ -1599,6 +1822,14 @@ def run_tasks(tasks: Sequence[RowGroupTask], workers: int) -> list[WorkerResult]
 def append_file(source_path: str, destination) -> None:
     with Path(source_path).open("r", encoding="utf-8") as source:
         shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def dataset_output_paths(output_dir: Path) -> dict[str, Path]:
@@ -1628,6 +1859,7 @@ def merge_results(
     output_dir: Path,
     args: argparse.Namespace,
     selected_source_rows: int,
+    spatialvlm_test_source_rows: int = 0,
 ) -> dict[str, Any]:
     final_paths = dataset_output_paths(output_dir)
     temporary_paths = {name: path.with_name(f".{path.name}.{os.getpid()}.tmp") for name, path in final_paths.items()}
@@ -1691,10 +1923,34 @@ def merge_results(
             stream.write("split\tmedia_key\n")
             for media_key, split in sorted(media_splits.items()):
                 stream.write(f"{split}\t{media_key}\n")
+        spatialvlm_train_test_hash_overlap = sum(
+            1
+            for media_key, split in media_splits.items()
+            if split == "train" and media_key in _SPATIALVLM_TEST_MEDIA_KEYS
+        )
+        if dataset == "spatialvlm":
+            spatialvlm_leakage = {
+                "official_test_records_written_to_train": counters[
+                    "official_test_records_written_to_train"
+                ],
+                "official_train_records_written_to_val": counters[
+                    "official_train_records_written_to_val"
+                ],
+                "post_filter_train_test_hash_overlap": spatialvlm_train_test_hash_overlap,
+            }
+            if any(spatialvlm_leakage.values()):
+                raise RuntimeError(
+                    f"SpatialVLM official split leakage detected: {spatialvlm_leakage}"
+                )
+        output_sha256 = {
+            key: file_sha256(temporary_paths[key])
+            for key in ("train", "val", "rejected", "media_groups")
+        }
         report = {
             "dataset": dataset,
             "input_files": [str(path) for path in sources],
             "output_files": {key: str(value) for key, value in final_paths.items() if key != "report"},
+            "output_sha256": output_sha256,
             "configuration": {
                 "seed": args.seed,
                 "val_ratio": args.val_ratio,
@@ -1702,8 +1958,16 @@ def merge_results(
                 "max_source_rows": args.max_source_rows,
                 "include_subtitles": args.include_subtitles,
                 "max_track_window_frames": args.max_track_window_frames,
+                "video_track_sources": (
+                    args.video_track_sources if dataset == "Molmo2-VideoTrack" else None
+                ),
                 "allow_unverified_remote_media": args.allow_unverified_remote_media,
                 "max_reject_ratio": args.max_reject_ratio,
+                "spatialvlm_split_policy": (
+                    "preserve_official_train_test_and_reserve_test_image_sha256"
+                    if dataset == "spatialvlm"
+                    else None
+                ),
             },
             "selected_source_rows": selected_source_rows,
             "counters": dict(sorted(counters.items())),
@@ -1714,6 +1978,30 @@ def merge_results(
                 "val": split_media_counts["val"],
                 "cross_split_leakage": 0,
             },
+            "spatialvlm_official_split_audit": (
+                {
+                    "official_test_source_rows": spatialvlm_test_source_rows,
+                    "test_media_hashes_reserved": len(_SPATIALVLM_TEST_MEDIA_KEYS),
+                    "train_records_excluded_for_test_hash": counters[
+                        "excluded_train_records_with_test_image_hash"
+                    ],
+                    "official_test_records_written_to_train": counters[
+                        "official_test_records_written_to_train"
+                    ],
+                    "official_test_records_written_to_val": counters[
+                        "official_test_records_written_to_val"
+                    ],
+                    "official_train_records_written_to_train": counters[
+                        "official_train_records_written_to_train"
+                    ],
+                    "official_train_records_written_to_val": counters[
+                        "official_train_records_written_to_val"
+                    ],
+                    "post_filter_train_test_hash_overlap": spatialvlm_train_test_hash_overlap,
+                }
+                if dataset == "spatialvlm"
+                else None
+            ),
             "reject_ratio": reject_ratio,
             "media_readiness": (
                 "unverified_remote_references"
@@ -1764,7 +2052,24 @@ def prepare_output_dir(dataset: str, output_root: Path) -> Path:
 
 
 def convert_dataset(dataset: str, args: argparse.Namespace) -> dict[str, Any]:
-    sources = discover_sources(dataset, args.input_root)
+    global _SPATIALVLM_TEST_MEDIA_KEYS
+    sources = discover_sources(
+        dataset,
+        args.input_root,
+        args.video_track_sources if dataset == "Molmo2-VideoTrack" else None,
+    )
+    if dataset == "spatialvlm":
+        _SPATIALVLM_TEST_MEDIA_KEYS, test_source_rows = build_spatialvlm_test_media_keys(
+            sources
+        )
+        print(
+            f"[spatialvlm] reserved official test rows={test_source_rows:,} "
+            f"unique_image_hashes={len(_SPATIALVLM_TEST_MEDIA_KEYS):,}",
+            flush=True,
+        )
+    else:
+        _SPATIALVLM_TEST_MEDIA_KEYS = set()
+        test_source_rows = 0
     output_dir = prepare_output_dir(dataset, args.output_root)
     fragment_dir = Path(tempfile.mkdtemp(prefix=".conversion-fragments-", dir=output_dir))
     completed_successfully = False
@@ -1779,7 +2084,13 @@ def convert_dataset(dataset: str, args: argparse.Namespace) -> dict[str, Any]:
         )
         results = run_tasks(tasks, args.num_workers)
         report = merge_results(
-            dataset, sources, results, output_dir, args, selected_source_rows
+            dataset,
+            sources,
+            results,
+            output_dir,
+            args,
+            selected_source_rows,
+            spatialvlm_test_source_rows=test_source_rows,
         )
         counters = report["counters"]
         print(
@@ -1883,6 +2194,7 @@ def main() -> int:
         track_videos,
         pixmo_point_groups,
         pixmo_url_groups,
+        set(),
     )
 
     summary: dict[str, Any] = {}
@@ -1890,7 +2202,7 @@ def main() -> int:
         summary[dataset] = convert_dataset(dataset, args)
     summary_document = {
         "datasets": summary,
-        "global_media_audit": audit_global_media(args.output_root),
+        "global_media_audit": audit_global_media(args.output_root, args.datasets),
     }
     temporary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
     try:

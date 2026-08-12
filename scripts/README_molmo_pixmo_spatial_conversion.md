@@ -119,9 +119,10 @@ missing LongCapQA URL mappings.
 
 ## Verified full server run
 
-The converter was run on all authoritative Parquets on `2026-08-03` with 24
-workers, seed 42, a 5% validation ratio, generated-video extraction, and the
-explicit diagnostic-only remote/partial-output flags. The installed output is
+The non-VideoTrack datasets were run on `2026-08-03` with 24 workers, seed 42,
+a 5% validation ratio, generated-video extraction, and the explicit
+diagnostic-only remote/partial-output flags. VideoTrack was independently
+materialized and converted on `2026-08-11`. The installed output is
 `/mnt/luojunkun/stage1/dataset_ms-swift`:
 
 | Dataset | Train | Val | Rejected source rows |
@@ -129,23 +130,25 @@ explicit diagnostic-only remote/partial-output flags. The installed output is
 | Molmo2-VideoCapQA | 905,548 | 47,586 | 49,485 |
 | Molmo2-VideoPoint | 603,085 | 31,525 | 23,730 |
 | Molmo2-VideoSubtitleQA | 444,963 | 23,539 | 0 |
-| Molmo2-VideoTrack | 0 | 0 | 29,704 |
+| Molmo2-VideoTrack | 23,620 | 1,014 | 40 |
 | pixmo-cap | 681,313 | 35,729 | 0 |
 | pixmo-points | 2,257,510 | 118,659 | 53 |
 | spatialvlm | 82,892 | 4,584 | 0 |
 
-The six non-empty datasets contain 5,236,933 records. The global audit covers
-seven manifests and 1,382,213 unique media keys with zero train/val conflicts.
+The seven non-empty datasets contain 5,261,567 records. The VideoTrack
+converter audit covers 1,319 canonical video lineages with zero train/val
+conflicts.
 Generated VideoPoint extraction produced 15,509 files; all 15,204 generated
 source rows use local absolute paths. SpatialVLM produced 27,328 deduplicated
 local images. The 53 rejected PixMo Points rows have empty labels.
 
 These counts describe a schema-valid partial export, not a fully media-ready
 training corpus. The Molmo requester-pays URLs remain unreadable without an
-authorized GCP quota project, 49,485 LongCapQA rows have no mapping, 23,730
-VideoPoint rows have no available source media, and VideoTrack has no licensed,
-pre-cropped window index. PixMo media remains URL-based. Each report records
-these states and rejection counts.
+authorized GCP quota project, 49,485 LongCapQA rows have no mapping, and 23,730
+VideoPoint rows have no available source media. VideoTrack is media-ready only
+for the five sources documented below; the other 11 sources remain skipped.
+PixMo media remains URL-based. Each report records these states and rejection
+counts.
 
 ## Dataset mapping
 
@@ -206,6 +209,8 @@ them legally:
 ```json
 {
   "dataset_name::clip_000_239": {
+    "source_video_id": "dataset_name::source_video_001",
+    "lineage_key": "dataset_name::source_video_001",
     "windows": [
       {
         "mode": "cropped",
@@ -227,12 +232,45 @@ them legally:
 The example annotation spans source frames `0..239`; both files together cover
 that exact inclusive range.
 
+Materialized indexes should declare `source_video_id` and `lineage_key`
+together. The converter verifies that both identify the annotation's `video`
+before using `lineage_key` for the split key. Legacy entries without either
+field use the dataset/video fallback; `mose` and `mosev2` both fall back to
+`mose-family::<video>`.
+
+For the `2026-08-11` partial training run, real media was available and
+materialized for `dancetrack`, `soccernet`, `mose`, `mosev2`, and `vipseg`.
+`APTv2`, `animaltrack`, `bdd100k`, `bft`, `mot2020`, `personpath22`, `sav`,
+`seadrones`, `sportsmot`, `teamtrack`, and `uavdt` were skipped because no
+reliable local media could be joined. `Molmo2-VideoCapQA`,
+`Molmo2-VideoPoint`, and `Molmo2-VideoSubtitleQA` were not read or modified by
+this run.
+
 ```bash
+python /mnt/workspace/stage1/scripts/materialize_molmo2_videotrack_media.py \
+  --scratch-dir /mnt/workspace/stage1/.videotrack-scratch \
+  --workers 8 \
+  --max-inflight-videos 16 \
+  --ffmpeg-threads 2 \
+  --max-scratch-bytes 16106127360
+
 python /mnt/workspace/stage1/scripts/prepare_molmo_pixmo_spatial_swift.py \
   --datasets Molmo2-VideoTrack \
-  --video-track-index /absolute/path/video_track_media.json \
-  --num-workers 24
+  --input-root /mnt/luojunkun/stage1/dataset \
+  --output-root /mnt/luojunkun/stage1/dataset_ms-swift \
+  --video-track-sources dancetrack mose mosev2 soccernet vipseg \
+  --video-track-index /mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/video_track_media.json \
+  --num-workers 12 \
+  --val-ratio 0.05 \
+  --seed 42 \
+  --max-reject-ratio 0.01 \
+  --overwrite
 ```
+
+For a partial media inventory, add `--video-track-sources mose mosev2` to read
+only those case-insensitive `data/<source>` Parquet groups. Unknown source names
+fail with the available source list, and the normalized selection is recorded
+in `conversion_report.json`.
 
 String-only index values and full source videos are rejected deliberately.
 Track points are normalized with the source width/height and retain object ID,
@@ -245,6 +283,46 @@ default; use `--max-track-window-frames` to change that bound. Output frame
 numbers and timestamps are local to each window and start at zero. Every window
 from the same original video retains the same video-level split key. Rows with
 unresolved, oversized, gapped, overlapping, or mismatched windows are rejected.
+
+The verified five-source result is:
+
+| Source | Source rows | Retained rows | Train records | Val records | Rejected rows | Clips | Unique MP4 windows |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dancetrack | 3,735 | 3,723 | 8,095 | 391 | 12 | 704 | 1,225 |
+| soccernet | 4,420 | 4,392 | 8,088 | 259 | 28 | 610 | 978 |
+| mose | 880 | 880 | 964 | 53 | 0 | 337 | 390 |
+| mosev2 | 1,168 | 1,168 | 1,258 | 60 | 0 | 463 | 527 |
+| vipseg | 5,466 | 5,466 | 5,215 | 251 | 0 | 675 | 675 |
+| **Total** | **15,669** | **15,629** | **23,620** | **1,014** | **40** | **2,789** | **3,795** |
+
+The 40 rejected rows are explicit cleaning failures: 26 have no point tracks
+and 14 contain visible points outside the declared source dimensions. One
+source row may expand into multiple SFT records when its frame range crosses a
+128-frame media window, which is why 15,629 retained source rows produce 24,634
+records. The media index contains 4,046 window references to 3,795 unique MP4s.
+All windows from the same canonical original video share one of 1,319 media
+group assignments; `mose` and `mosev2` use the shared `mose-family` lineage.
+
+The GT visualization audit renders points on the decoded source frames. It
+contains three sampled clips per source, 45 PNG overlays, and 108 declared and
+rendered points with no unresolved source. The MOSEv2 multipart SHA-256 values
+for all three archive parts matched `SHA256SUMS`.
+
+Run the strict end-to-end audit with the same source allowlist:
+
+```bash
+python /mnt/workspace/stage1/scripts/audit_molmo2_videotrack_swift.py \
+  --source-root /mnt/luojunkun/stage1/dataset/Molmo2-VideoTrack \
+  --output-dir /mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack \
+  --video-track-sources dancetrack mose mosev2 soccernet vipseg \
+  --media-workers 24 \
+  --report /mnt/luojunkun/stage1/dataset_ms-swift/Molmo2-VideoTrack/audit_report.json
+```
+
+The `2026-08-11` audit passed with zero hard failures: all 3,795 MP4s passed
+ffprobe plus first/last-frame decoding, all 15,669 source rows were accounted
+for as 15,629 retained and 40 rejected rows, and both canonical-lineage and
+source-video cross-split leakage counts were zero.
 
 ### pixmo-cap
 
@@ -280,9 +358,66 @@ Local video materialization requires a separately authorized GCP
 project and downloader. Do not replace them with YouTube watch-page URLs,
 which are not direct video resources.
 
-PixMo S3 resources are directly reachable. For stable repeated training,
-download them separately, verify pixmo-points bytes against `image_sha256`, and
-rewrite `images` to absolute local paths.
+PixMo contains a mixture of PixMo S3 and third-party image URLs. The checked
+server can reach the S3 resources, while some third-party hosts are blocked,
+expired, or return different bytes. For stable repeated training, download
+reachable images separately, verify pixmo-points bytes against `image_sha256`,
+and rewrite `images` to absolute local paths.
+
+Use the resumable materializer for PixMo URL media:
+
+```bash
+python scripts/download_pixmo_media.py \
+  --source-root /path/to/source-datasets \
+  --output-root /path/to/converted-ms-swift-datasets \
+  --state-root /path/on-a-local-filesystem/pixmo-download-state \
+  --datasets pixmo-cap pixmo-points \
+  --workers 32
+```
+
+`--state-root` must be on a filesystem that supports SQLite locking; do not put
+it on an object-store FUSE mount. A restorable database checkpoint is copied
+to each dataset directory. Downloads use temporary files and atomic renames,
+decode every retained image with Pillow, and enforce the source SHA-256 values
+for pixmo-points. Original `train.jsonl` and `val.jsonl` files are unchanged.
+After all URLs have been attempted, the script writes `local_train.jsonl` and
+`local_val.jsonl` with absolute local paths and excludes unavailable media into
+the corresponding `local_*_rejected.jsonl` files. Progress and exact outcome
+counts are recorded in `media_download_report.json`, `localization_report.json`,
+and `media_download_manifest.jsonl`.
+
+Inspect a running or resumed job without downloading more media:
+
+```bash
+python scripts/download_pixmo_media.py \
+  --source-root /path/to/source-datasets \
+  --output-root /path/to/converted-ms-swift-datasets \
+  --state-root /path/on-a-local-filesystem/pixmo-download-state \
+  --datasets pixmo-cap pixmo-points \
+  --phase status
+```
+
+For a partial-image training run, rebuild the ordinary local splits after each
+download batch. The DLC decontamination pass consumes these local files later:
+
+```bash
+python scripts/download_pixmo_media.py \
+  --source-root /mnt/luojunkun/stage1/dataset \
+  --output-root /mnt/luojunkun/stage1/dataset_ms-swift \
+  --state-root /tmp/pixmo-download-state \
+  --datasets pixmo-cap pixmo-points \
+  --phase rewrite \
+  --allow-incomplete-rewrite \
+  --rewrite-splits train val
+```
+
+This writes `local_train.jsonl` and `local_val.jsonl`. The DLC manifest uses
+`local_train.jsonl` as source and materializes `local_dlc_train.jsonl` after
+removing every train row whose media occurs in any eval set. Do not use
+`local_global_train.jsonl` for this run: that older entrypoint also removes
+cross-dataset train media. Missing media remains listed in the matching
+`local_*_rejected.jsonl`; rerunning the command after more downloads atomically
+expands the local files without changing the source JSONL.
 
 ## Training
 
@@ -291,8 +426,8 @@ Pass the files explicitly so ms-swift does not split rows again:
 ```bash
 swift sft \
   --model /absolute/path/to/model \
-  --dataset /mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/train.jsonl \
-  --val_dataset /mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/val.jsonl
+  --dataset /mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/local_dlc_train.jsonl \
+  --val_dataset /mnt/luojunkun/stage1/dataset_ms-swift/pixmo-points/local_val.jsonl
 ```
 
 In the checked server's default Python environment, importing the complete

@@ -1,0 +1,4 @@
+interface:
+  display_name: "VLM Benchmark Analysis"
+  short_description: "Paired VLM scoring with verbatim JSON reports"
+  default_prompt: "Use $analyze-vlm-benchmarks to compare paired VLM results and build a validated Chinese HTML report with complete verbatim sample and prediction JSON."

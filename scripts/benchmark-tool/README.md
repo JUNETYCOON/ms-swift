@@ -38,6 +38,7 @@ python scripts/benchmark-tool/cli.py --help
 | 运行 VLMEvalKit/外部官方接口 | `vlm-eval run ...` |
 | 汇总已有正式结果并画图 | `vlm-eval visual ...` |
 | 准备服务器本地 benchmark 数据 | `python scripts/benchmark-tool/prepare_local_benchmarks.py ...` |
+| 下载并审计 Hy-Embodied benchmark 清单 | `python scripts/benchmark-tool/download_hy_benchmarks.py --dry-run` |
 | 生成 Stage 1 汇总报告 | `python scripts/benchmark-tool/generate_stage1_report.py` |
 
 ## RoboVQA 快速对比

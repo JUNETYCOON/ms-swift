@@ -74,7 +74,11 @@ def _score_row(record: Mapping[str, Any], line_number: int, task: str, model_nam
         'error': error,
     }
     if task == 'vqa':
-        scores = vqa_scores(prediction, references)
+        scores = vqa_scores(
+            prediction,
+            references,
+            record.get('question') or _raw_user_text(record),
+        )
         row.update(scores)
         accumulator.add_vqa(scores, failed=bool(error))
     elif task == 'description':
