@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import heapq
 import json
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 DEFAULT_MANIFEST = Path(
@@ -31,6 +32,7 @@ TARGET_ROWS = 100
 CANDIDATE_ROWS = 400
 BASE_SEED = 20260810
 CHUNK_SIZE = 8 * 1024 * 1024
+MAX_MEDIA_PRESENCE_CHECKS = 0
 REMOTE_SCHEMES = {"http", "https", "s3", "gs", "oss"}
 PLACEHOLDERS = {"images": "<image>", "videos": "<video>", "audios": "<audio>"}
 
@@ -49,9 +51,11 @@ DISPLAY_NAMES = {
     "molmo2-video-capqa": "Molmo2-VideoCapQA",
     "molmo2-video-point": "Molmo2-VideoPoint",
     "molmo2-video-subtitleqa": "Molmo2-VideoSubtitleQA",
+    "molmo2-video-track": "Molmo2-VideoTrack",
     "pixmo-cap": "PixMo-Cap",
     "pixmo-points": "PixMo-Points",
     "llava": "LLaVA-Instruct",
+    "coco": "COCO",
 }
 
 TASK_TYPES = {
@@ -69,9 +73,11 @@ TASK_TYPES = {
     "molmo2-video-capqa": "video VQA / caption QA",
     "molmo2-video-point": "video pointing",
     "molmo2-video-subtitleqa": "video subtitle QA",
+    "molmo2-video-track": "video tracking",
     "pixmo-cap": "long description",
     "pixmo-points": "pointing / counting",
     "llava": "mixed instruction tuning",
+    "coco": "multi-label image classification / caption-style instruction",
 }
 
 
@@ -268,7 +274,10 @@ def resolve_reference(reference: str, jsonl_path: Path) -> str:
     path = Path(reference).expanduser()
     if not path.is_absolute():
         path = jsonl_path.parent / path
-    return str(path.resolve())
+    # Avoid Path.resolve() here: on OSS/FUSE-backed dataset roots it can turn
+    # every media reference into a blocking filesystem lookup. Existence and
+    # decoding are checked later in batched media snapshots and sample archiving.
+    return os.path.abspath(os.fspath(path))
 
 
 def placeholder_count(
@@ -589,6 +598,7 @@ def scan_dataset(
                 "record_archive_path": sample["record_archive_path"],
                 "media_status": sample["media_status"],
                 "media_assets": sample["media_assets"],
+                "ground_truth_overlay": sample.get("ground_truth_overlay") or [],
                 "format_errors": sample["format_errors"],
                 "input_preview": sample["input_preview"],
                 "output_preview": sample["output_preview"],
@@ -630,6 +640,13 @@ def scan_dataset(
         },
         "media_snapshot": media_snapshot,
         "sample_media_statuses": dict(Counter(row["media_status"] for row in sample_rows)),
+        "ground_truth_overlay_statuses": dict(
+            Counter(
+                overlay.get("status", "unknown")
+                for row in sample_rows
+                for overlay in (row.get("ground_truth_overlay") or [])
+            )
+        ),
         "metadata_reports": metadata_reports,
     }
     schema = {
@@ -689,46 +706,46 @@ def audit_media_population(media_references: dict[str, set[str]]) -> dict[str, A
     for media_type, references in media_references.items():
         remote = sorted(value for value in references if is_remote(value))
         local = sorted(value for value in references if not is_remote(value))
-        grouped: dict[str, set[str]] = defaultdict(set)
-        for raw_path in local:
-            path = Path(raw_path)
-            grouped[str(path.parent)].add(path.name)
         present_count = 0
         missing_count = 0
         missing_examples = []
-        unreadable_parents = []
-        for parent_value, expected_names in grouped.items():
-            parent = Path(parent_value)
-            remaining = set(expected_names)
+        unreadable_examples = []
+        checked_local = local[:MAX_MEDIA_PRESENCE_CHECKS]
+        unchecked_local = max(0, len(local) - len(checked_local))
+
+        def check_path(raw_path: str) -> tuple[str, bool, str | None]:
             try:
-                with os.scandir(parent) as iterator:
-                    for entry in iterator:
-                        if entry.name in remaining and entry.is_file(follow_symlinks=True):
-                            remaining.remove(entry.name)
-                            if not remaining:
-                                break
+                return raw_path, Path(raw_path).is_file(), None
             except OSError as exc:
-                unreadable_parents.append(
-                    {"path": parent_value, "error": f"{type(exc).__name__}: {exc}"}
-                )
-            present_count += len(expected_names) - len(remaining)
-            missing_count += len(remaining)
-            if len(missing_examples) < 20:
-                missing_examples.extend(
-                    str(parent / name)
-                    for name in sorted(remaining)[: 20 - len(missing_examples)]
-                )
+                return raw_path, False, f"{type(exc).__name__}: {exc}"
+
+        workers = min(32, max(1, (os.cpu_count() or 4) * 2))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for raw_path, exists, error in executor.map(check_path, checked_local, chunksize=1024):
+                if exists:
+                    present_count += 1
+                else:
+                    missing_count += 1
+                    if len(missing_examples) < 20:
+                        missing_examples.append(raw_path)
+                    if error and len(unreadable_examples) < 20:
+                        unreadable_examples.append({"path": raw_path, "error": error})
         result[media_type] = {
             "unique_references": len(references),
             "local_references": len(local),
             "remote_references": len(remote),
+            "local_presence_check_mode": (
+                "complete_reference_stat" if unchecked_local == 0 else "bounded_reference_stat"
+            ),
+            "local_presence_checked": len(checked_local),
+            "local_presence_unchecked": unchecked_local,
             "local_present": present_count,
             "local_missing": missing_count,
-            "local_presence_ratio": present_count / len(local) if local else None,
+            "local_presence_ratio": present_count / len(checked_local) if checked_local else None,
             "remote_examples": remote[:20],
             "missing_examples": missing_examples,
-            "unreadable_parent_count": len(unreadable_parents),
-            "unreadable_parent_examples": unreadable_parents[:20],
+            "unreadable_reference_count": len(unreadable_examples),
+            "unreadable_reference_examples": unreadable_examples,
         }
     return result
 
@@ -771,34 +788,44 @@ def copy_image(source: Path, dataset_dir: Path, cache: dict[str, dict[str, Any]]
         result = {"source": source_key, "status": "missing"}
         cache[source_key] = result
         return dict(result)
-    hasher = hashlib.sha256()
     try:
-        with source.open("rb") as stream:
+        staging_dir = dataset_dir / "media"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        temporary = staging_dir / f".{os.getpid()}-{hashlib.sha256(source_key.encode('utf-8')).hexdigest()}.tmp"
+        hasher = hashlib.sha256()
+        byte_length = 0
+        with source.open("rb") as stream, temporary.open("wb") as output_stream:
             for chunk in iter(lambda: stream.read(CHUNK_SIZE), b""):
                 hasher.update(chunk)
+                output_stream.write(chunk)
+                byte_length += len(chunk)
         digest = hasher.hexdigest()
-        with Image.open(source) as image:
+        with Image.open(temporary) as image:
             image.load()
             width, height = image.size
             image_format = (image.format or source.suffix.lstrip(".") or "bin").lower()
         extension = source.suffix.lower() or (".jpg" if image_format == "jpeg" else f".{image_format}")
         relative = Path("media") / f"{digest}{extension}"
         destination = dataset_dir / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not destination.is_file():
-            with source.open("rb") as input_stream, destination.open("wb") as output_stream:
-                shutil.copyfileobj(input_stream, output_stream, CHUNK_SIZE)
+        if destination.is_file():
+            temporary.unlink(missing_ok=True)
+        else:
+            os.replace(temporary, destination)
         result = {
             "source": source_key,
             "status": "available",
             "archive_path": relative.as_posix(),
             "sha256": digest,
-            "byte_length": source.stat().st_size,
+            "byte_length": byte_length,
             "width": width,
             "height": height,
             "format": image_format,
         }
     except Exception as exc:
+        try:
+            temporary.unlink(missing_ok=True)  # type: ignore[name-defined]
+        except Exception:
+            pass
         result = {
             "source": source_key,
             "status": "decode_error",
@@ -806,6 +833,145 @@ def copy_image(source: Path, dataset_dir: Path, cache: dict[str, dict[str, Any]]
         }
     cache[source_key] = result
     return dict(result)
+
+
+def sha256_path(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(CHUNK_SIZE), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def image_ids_for_boxes(objects: dict[str, Any], box_count: int) -> list[int]:
+    raw = objects.get("image_id")
+    if isinstance(raw, list) and len(raw) == box_count and all(isinstance(item, int) for item in raw):
+        return list(raw)
+    if raw is None:
+        return [0] * box_count
+    return []
+
+
+def normalize_box_or_point(
+    values: list[int | float],
+    *,
+    width: int,
+    height: int,
+    bbox_type: str,
+) -> tuple[float, ...] | None:
+    if len(values) not in {2, 4}:
+        return None
+    nums = [float(value) for value in values]
+    if bbox_type == "norm1":
+        scale = [width, height] if len(nums) == 2 else [width, height, width, height]
+        nums = [value * scale[index] for index, value in enumerate(nums)]
+    elif bbox_type in {"norm1000", "qwen1000"}:
+        scale = [width / 1000.0, height / 1000.0] if len(nums) == 2 else [
+            width / 1000.0,
+            height / 1000.0,
+            width / 1000.0,
+            height / 1000.0,
+        ]
+        nums = [value * scale[index] for index, value in enumerate(nums)]
+    elif bbox_type != "real":
+        return None
+    return tuple(nums)
+
+
+def draw_label(draw: ImageDraw.ImageDraw, xy: tuple[float, float], text: str) -> None:
+    x, y = xy
+    pad = 3
+    try:
+        bbox = draw.textbbox((x, y), text)
+        background = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+    except Exception:
+        background = (x, y, x + 9 * len(text), y + 16)
+    draw.rectangle(background, fill=(255, 255, 255))
+    draw.text((x, y), text, fill=(210, 20, 20))
+
+
+def render_image_gt_overlay(
+    image_asset: dict[str, Any],
+    primitives: list[tuple[int, list[int | float]]],
+    objects: dict[str, Any],
+    dataset_dir: Path,
+    sample_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    source_path = image_asset.get("archive_path")
+    if not source_path:
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": "image_asset_missing_archive_path"}
+    bbox_type = str(objects.get("bbox_type") or "real")
+    source = dataset_dir / source_path
+    if not source.is_file():
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": "image_archive_missing"}
+    rendered = 0
+    unresolved = 0
+    try:
+        with Image.open(source) as original:
+            image = original.convert("RGB")
+            width, height = image.size
+        draw = ImageDraw.Draw(image)
+        draw_label(draw, (10, 10), "GT")
+        for primitive_index, box in primitives:
+            normalized = normalize_box_or_point(box, width=width, height=height, bbox_type=bbox_type)
+            if normalized is None:
+                unresolved += 1
+                continue
+            if len(normalized) == 2:
+                x, y = normalized
+                radius = max(4, int(min(width, height) * 0.008))
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(255, 0, 0), width=4)
+                draw.line((x - radius * 2, y, x + radius * 2, y), fill=(255, 0, 0), width=2)
+                draw.line((x, y - radius * 2, x, y + radius * 2), fill=(255, 0, 0), width=2)
+                draw_label(draw, (x + radius + 3, y + radius + 3), f"GT p{primitive_index}")
+            else:
+                x1, y1, x2, y2 = normalized
+                draw.rectangle((x1, y1, x2, y2), outline=(255, 0, 0), width=max(3, int(min(width, height) * 0.004)))
+                draw_label(draw, (x1, max(0, y1 - 18)), f"GT box{primitive_index}")
+            rendered += 1
+        if rendered == 0:
+            return None, {
+                "status": "ground_truth_overlay_unresolved",
+                "reason": "no_supported_image_primitives",
+                "declared_primitives": len(primitives),
+                "rendered_primitives": rendered,
+                "unresolved_primitives": unresolved,
+                "bbox_type": bbox_type,
+            }
+        overlay_relative = Path("derived-preview") / f"{sample_id}-gt-overlay.jpg"
+        overlay_path = dataset_dir / overlay_relative
+        overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(overlay_path, format="JPEG", quality=92)
+        digest = sha256_path(overlay_path)
+        asset = {
+            "type": "images",
+            "source": image_asset.get("source"),
+            "status": "available",
+            "archive_path": overlay_relative.as_posix(),
+            "sha256": digest,
+            "width": width,
+            "height": height,
+            "format": "jpeg",
+            "derived_preview": "GT overlay rendered on a copy of the archived original image",
+            "gt_overlay": True,
+            "clean_archive_path": source_path,
+        }
+        evidence = {
+            "status": "rendered",
+            "media_type": "images",
+            "target_media_archive_path": source_path,
+            "overlay_path": overlay_relative.as_posix(),
+            "overlay_sha256": digest,
+            "coordinate_convention": bbox_type,
+            "declared_primitives": len(primitives),
+            "rendered_primitives": rendered,
+            "unresolved_primitives": unresolved,
+            "image_width": width,
+            "image_height": height,
+        }
+        return asset, evidence
+    except Exception as exc:
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def ffprobe_video(source: Path) -> dict[str, Any]:
@@ -821,6 +987,166 @@ def ffprobe_video(source: Path) -> dict[str, Any]:
     ]
     completed = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
     return json.loads(completed.stdout)
+
+
+TRACK_POINT_RE = re.compile(
+    r"(?:Object\s+(?P<object>\d+),\s*)?frame\s+(?P<frame>\d+)\s*(?:\((?P<time>[0-9.]+)s\))?\s*:\s*"
+    r"\[(?P<x>-?\d+(?:\.\d+)?),\s*(?P<y>-?\d+(?:\.\d+)?)\]",
+    re.IGNORECASE,
+)
+
+
+def parse_video_track_points(record: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = record.get("messages")
+    if not isinstance(messages, list):
+        return []
+    outputs = [
+        text_from_content(message.get("content"))
+        for message in messages
+        if isinstance(message, dict) and str(message.get("role") or "") == "assistant"
+    ]
+    points = []
+    for text in outputs:
+        for match in TRACK_POINT_RE.finditer(text):
+            points.append(
+                {
+                    "object": int(match.group("object") or 0),
+                    "frame": int(match.group("frame")),
+                    "time_seconds": float(match.group("time")) if match.group("time") is not None else None,
+                    "x": float(match.group("x")),
+                    "y": float(match.group("y")),
+                }
+            )
+    return points
+
+
+def representative_video_points(points: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
+    if len(points) <= limit:
+        return points
+    wanted = {
+        round(index * (len(points) - 1) / (limit - 1))
+        for index in range(limit)
+    }
+    return [points[index] for index in sorted(wanted)]
+
+
+def render_video_gt_overlay(
+    source: Path,
+    points: list[dict[str, Any]],
+    dataset_dir: Path,
+    sample_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if not source.is_file():
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": "video_missing"}
+    selected = representative_video_points(points)
+    if not selected:
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": "no_parseable_frame_points"}
+    try:
+        probe = ffprobe_video(source)
+        video_stream = next(
+            (
+                stream
+                for stream in probe.get("streams", [])
+                if isinstance(stream, dict) and stream.get("codec_type") == "video"
+            ),
+            {},
+        )
+        width = int(video_stream.get("width") or 0)
+        height = int(video_stream.get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError("video width/height unavailable")
+        frame_dir = dataset_dir / "derived-preview" / f"{sample_id}-gt-video-frames"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        rendered_frames = []
+        for index, point in enumerate(selected):
+            frame_path = frame_dir / f"frame-{index:02d}.jpg"
+            if point.get("time_seconds") is not None:
+                seek_args = ["-ss", f"{float(point['time_seconds']):.6f}"]
+                selector_note = f"time={point['time_seconds']:.6f}s"
+            else:
+                seek_args = []
+                selector_note = f"frame={point['frame']}"
+            command = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *seek_args,
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(frame_path),
+            ]
+            if not frame_path.is_file():
+                subprocess.run(command, capture_output=True, timeout=120, check=True)
+            with Image.open(frame_path) as original:
+                image = original.convert("RGB")
+                frame_width, frame_height = image.size
+            draw = ImageDraw.Draw(image)
+            x = point["x"] / 1000.0 * frame_width
+            y = point["y"] / 1000.0 * frame_height
+            radius = max(4, int(min(frame_width, frame_height) * 0.012))
+            draw_label(draw, (10, 10), "GT")
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(255, 0, 0), width=4)
+            draw.line((x - radius * 2, y, x + radius * 2, y), fill=(255, 0, 0), width=2)
+            draw.line((x, y - radius * 2, x, y + radius * 2), fill=(255, 0, 0), width=2)
+            draw_label(draw, (x + radius + 3, y + radius + 3), f"GT f{point['frame']}")
+            image.save(frame_path, format="JPEG", quality=92)
+            rendered_frames.append(
+                {
+                    "path": frame_path,
+                    "selector": selector_note,
+                    "frame": point["frame"],
+                    "object": point["object"],
+                    "x_norm1000": point["x"],
+                    "y_norm1000": point["y"],
+                }
+            )
+        images = [Image.open(item["path"]).convert("RGB") for item in rendered_frames]
+        tile_width = max(image.size[0] for image in images)
+        tile_height = max(image.size[1] for image in images)
+        columns = min(3, len(images))
+        rows = (len(images) + columns - 1) // columns
+        contact = Image.new("RGB", (columns * tile_width, rows * tile_height), "white")
+        for index, image in enumerate(images):
+            contact.paste(image, ((index % columns) * tile_width, (index // columns) * tile_height))
+            image.close()
+        overlay_relative = Path("derived-preview") / f"{sample_id}-gt-video-overlay.jpg"
+        overlay_path = dataset_dir / overlay_relative
+        contact.save(overlay_path, format="JPEG", quality=92)
+        digest = sha256_path(overlay_path)
+        asset = {
+            "type": "videos",
+            "source": str(source),
+            "status": "available",
+            "archive_path": overlay_relative.as_posix(),
+            "preview_sha256": digest,
+            "preview_width": contact.size[0],
+            "preview_height": contact.size[1],
+            "derived_preview": "GT overlay on parsed video frame points as a contact sheet",
+            "gt_overlay": True,
+        }
+        evidence = {
+            "status": "rendered",
+            "media_type": "videos",
+            "target_media": str(source),
+            "overlay_path": overlay_relative.as_posix(),
+            "overlay_sha256": digest,
+            "coordinate_convention": "norm1000_points_from_assistant_text",
+            "declared_primitives": len(points),
+            "rendered_primitives": len(rendered_frames),
+            "frame_selection": [
+                {key: value for key, value in item.items() if key != "path"}
+                for item in rendered_frames
+            ],
+        }
+        return asset, evidence
+    except Exception as exc:
+        return None, {"status": "ground_truth_overlay_unresolved", "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def video_preview(source: Path, dataset_dir: Path, cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -961,6 +1287,86 @@ def archive_samples(
                             "status": "available" if source.is_file() else "missing",
                         }
                     )
+        gt_overlays = []
+        gt_evidence = []
+        if isinstance(record, dict):
+            objects = record.get("objects")
+            if isinstance(objects, dict) and isinstance(objects.get("bbox"), list) and objects.get("bbox"):
+                boxes = [
+                    box
+                    for box in objects.get("bbox") or []
+                    if isinstance(box, list) and len(box) in {2, 4}
+                ]
+                image_ids = image_ids_for_boxes(objects, len(boxes))
+                if not image_ids:
+                    gt_evidence.append(
+                        {
+                            "status": "ground_truth_overlay_unresolved",
+                            "reason": "image_id_missing_or_length_mismatch",
+                            "declared_primitives": len(boxes),
+                        }
+                    )
+                else:
+                    image_assets = [
+                        asset
+                        for asset in assets
+                        if asset.get("type") == "images" and asset.get("status") == "available"
+                    ]
+                    for image_index, image_asset in enumerate(image_assets):
+                        primitives = [
+                            (primitive_index, box)
+                            for primitive_index, (box, target_image_id) in enumerate(zip(boxes, image_ids))
+                            if target_image_id == image_index
+                        ]
+                        if not primitives:
+                            continue
+                        overlay, evidence = render_image_gt_overlay(
+                            image_asset,
+                            primitives,
+                            objects,
+                            dataset_dir,
+                            f"{sample_id}-image{image_index}",
+                        )
+                        gt_evidence.append(evidence)
+                        if overlay is not None:
+                            gt_overlays.append(overlay)
+                    if not any(item.get("status") == "rendered" for item in gt_evidence):
+                        gt_evidence.append(
+                            {
+                                "status": "ground_truth_overlay_unresolved",
+                                "reason": "no_available_image_asset_for_declared_objects",
+                                "declared_primitives": len(boxes),
+                            }
+                        )
+            video_points = parse_video_track_points(record)
+            if video_points:
+                local_videos = [
+                    item["reference"]
+                    for item in all_references
+                    if item.get("type") == "videos"
+                    and isinstance(item.get("reference"), str)
+                    and not is_remote(str(item["reference"]))
+                ]
+                if local_videos:
+                    overlay, evidence = render_video_gt_overlay(
+                        Path(local_videos[0]),
+                        video_points,
+                        dataset_dir,
+                        f"{sample_id}-video0",
+                    )
+                    gt_evidence.append(evidence)
+                    if overlay is not None:
+                        gt_overlays.append(overlay)
+                else:
+                    gt_evidence.append(
+                        {
+                            "status": "ground_truth_overlay_unresolved",
+                            "reason": "parseable_video_points_but_no_local_video",
+                            "declared_primitives": len(video_points),
+                        }
+                    )
+        if gt_overlays:
+            assets = gt_overlays + assets
         statuses = [asset["status"] for asset in assets]
         if not all_references:
             media_status = "text_only"
@@ -988,8 +1394,10 @@ def archive_samples(
                 "media_status": media_status,
                 "media_references": all_references,
                 "media_assets": assets,
+                "ground_truth_overlay": gt_evidence,
                 "input_preview": question,
                 "output_preview": answer,
+                "raw_record": record,
                 "metadata_preview": {
                     key: value
                     for key, value in record.items()

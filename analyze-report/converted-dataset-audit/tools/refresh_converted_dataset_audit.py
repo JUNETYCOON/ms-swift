@@ -200,6 +200,7 @@ def collect_post_audit_status(
         "official_validator_passed": validator.get("returncode") == 0,
         "ready_count": sum(bool(row["exists"] and row["size"]) for row in entrypoints.values()),
         "dataset_count": len(entrypoints),
+        "eval_count": len(validator.get("eval_entries") or []),
         "datasets": entrypoints,
     }
 
@@ -225,9 +226,11 @@ def main() -> int:
     overall_path = output_root / "overall-summary.json"
     overall = load_json(overall_path)
 
+    present_names = {item["name"] for item in overall["datasets"]}
     refresh_results = {
         dataset: refresh_pixmo_dataset(output_root, converted_root, dataset)
         for dataset in PIXMO_DATASETS
+        if dataset in present_names
     }
     entrypoints, media = collect_post_audit_status(output_root, converted_root, overall)
     media["sample_refresh"] = refresh_results

@@ -162,6 +162,7 @@ def validate_dataset(root: Path, name: str, samples_expected: int, candidates_ex
     sample_ids = set()
     archived_assets: set[Path] = set()
     status_counts: dict[str, int] = {}
+    gt_overlay_counts: dict[str, int] = {}
     for row in samples:
         sample_id = row.get("sample_id")
         if not isinstance(sample_id, str) or not sample_id or sample_id in sample_ids:
@@ -172,12 +173,15 @@ def validate_dataset(root: Path, name: str, samples_expected: int, candidates_ex
         status_counts[status] = status_counts.get(status, 0) + 1
         assets = row.get("media_assets") or []
         available_assets = 0
+        overlay_assets = 0
         for asset in assets:
             if not isinstance(asset, dict) or not asset.get("archive_path"):
                 continue
             path = safe_path(dataset_dir, str(asset["archive_path"]), "media asset")
             archived_assets.add(path)
             available_assets += 1
+            if asset.get("gt_overlay"):
+                overlay_assets += 1
             expected = asset.get("sha256") or asset.get("preview_sha256")
             if not isinstance(expected, str) or len(expected) != 64:
                 raise ValidationError(f"missing asset hash: {name}: {sample_id}: {path}")
@@ -186,6 +190,20 @@ def validate_dataset(root: Path, name: str, samples_expected: int, candidates_ex
             decode_image(path)
         if status in {"available", "partial"} and available_assets == 0:
             raise ValidationError(f"available sample lacks archived asset: {name}: {sample_id}")
+        objects = row.get("objects")
+        has_declared_image_gt = (
+            isinstance(objects, dict)
+            and isinstance(objects.get("bbox"), list)
+            and bool(objects.get("bbox"))
+            and any(isinstance(asset, dict) and asset.get("type") == "images" for asset in assets)
+        )
+        overlays = row.get("ground_truth_overlay") or []
+        for overlay in overlays:
+            if isinstance(overlay, dict):
+                overlay_status = str(overlay.get("status") or "unknown")
+                gt_overlay_counts[overlay_status] = gt_overlay_counts.get(overlay_status, 0) + 1
+        if has_declared_image_gt and overlay_assets == 0:
+            raise ValidationError(f"image grounding sample lacks GT overlay asset: {name}: {sample_id}")
 
     report = root / f"{name}.html"
     parser = parse_html(report)
@@ -207,6 +225,7 @@ def validate_dataset(root: Path, name: str, samples_expected: int, candidates_ex
         "candidate_decisions": len(decisions),
         "archived_assets": len(archived_assets),
         "sample_media_statuses": status_counts,
+        "ground_truth_overlay_statuses": gt_overlay_counts,
     }
 
 
