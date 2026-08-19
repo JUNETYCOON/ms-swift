@@ -188,6 +188,16 @@ def _build_parser() -> argparse.ArgumentParser:
         '--retry-errors', action='store_true',
         help='With --resume, remove prior failed rows and run those dataset rows again.')
     custom_eval.add_argument('--overwrite', action='store_true')
+    custom_eval.add_argument(
+        '--plot-every', type=int, default=10,
+        help='Refresh local point_acc.png/iou.png and W&B plots every N processed samples.')
+    custom_eval.add_argument(
+        '--plot-dir',
+        help='Directory for point_acc.png/iou.png. Defaults to OUTPUT_DIR/plots.')
+    custom_eval.add_argument('--wandb-project', help='Enable W&B logging of cumulative eval metrics and plots.')
+    custom_eval.add_argument('--wandb-entity', help='W&B entity used with --wandb-project.')
+    custom_eval.add_argument('--wandb-run-id', help='Resume/attach to an existing W&B run.')
+    custom_eval.add_argument('--wandb-run-name', help='W&B run name when --wandb-run-id is not set.')
 
     listing = subparsers.add_parser('list-benchmarks', help='List registered benchmarks and official metrics.')
     listing.add_argument('--details', action='store_true', help='Also show task, output, backend and reference.')
@@ -393,11 +403,13 @@ def _run_score_custom(args: argparse.Namespace) -> int:
 def _run_custom_eval(args: argparse.Namespace) -> int:
     weights = Path(args.model_weights)
     dataset = Path(args.val_dataset)
+    output_dir = Path(args.output_dir)
+    plot_dir = Path(args.plot_dir) if args.plot_dir else output_dir / 'plots'
     config = EvalConfig(
         val_dataset=dataset,
         model_weights=weights,
         base_model=Path(args.base_model) if args.base_model else None,
-        output_dir=Path(args.output_dir),
+        output_dir=output_dir,
         model_name=args.model_name or weights.name,
         dataset_name=args.dataset_name or dataset.stem,
         model_type=args.model_type,
@@ -421,6 +433,12 @@ def _run_custom_eval(args: argparse.Namespace) -> int:
         min_video_batch_size=args.min_video_batch_size,
         iou_threshold=args.iou_threshold,
         prediction_space=args.prediction_space,
+        plot_every=args.plot_every,
+        plot_dir=plot_dir,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_id=args.wandb_run_id,
+        wandb_run_name=args.wandb_run_name,
         trust_remote_code=args.trust_remote_code,
         progress_every=args.progress_every,
         continue_on_error=args.continue_on_error,

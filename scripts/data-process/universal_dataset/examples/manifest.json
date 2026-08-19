@@ -1,0 +1,48 @@
+{
+  "format": "s1-udf",
+  "schema_version": "1.0.0",
+  "dataset": {
+    "name": "s1-udf-representative-examples",
+    "version": "1.0.0",
+    "description": "Contract examples spanning VQA, grounding, tracking, panoptic segmentation, and embodied trajectories."
+  },
+  "record_files": [
+    {
+      "path": "representative.jsonl",
+      "format": "jsonl",
+      "count": 5,
+      "sha256": "a9e6316adac8f3d73d83e84c5d1019ae5e27f8ca70ebe6578f6c4da5edb6a034"
+    }
+  ],
+  "task_types": [
+    "qa",
+    "grounding",
+    "dialogue",
+    "tracking",
+    "panoptic_segmentation",
+    "embodied_trajectory",
+    "language_conditioned_control"
+  ],
+  "splits": {
+    "train": 4,
+    "val": 1
+  },
+  "grouping": {
+    "field": "group_id",
+    "semantics": "All records sharing an underlying image, video, scene episode, or connected media component use one group_id.",
+    "identity_fields": [
+      "group_id",
+      "assets[].sha256",
+      "assets[].source_identities[]",
+      "assets[].uri",
+      "assets[].source_ref",
+      "episode.id"
+    ]
+  },
+  "statistics": {
+    "records": 5,
+    "groups": 5,
+    "unique_assets": 7,
+    "episodes": 1
+  }
+}

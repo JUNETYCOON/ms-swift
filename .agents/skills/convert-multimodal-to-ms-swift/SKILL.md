@@ -1,6 +1,6 @@
 ---
 name: convert-multimodal-to-ms-swift
-description: Inspect and convert image, video, audio, caption, VQA, grounding, point, and tracking datasets into deterministic ms-swift JSONL for SFT. Use for schema discovery, media-level train/val splitting, parallel conversion, rejection reporting, media validation, and leakage audits.
+description: Inspect and convert image, video, audio, caption, VQA, grounding, point, and tracking datasets into deterministic ms-swift JSONL for SFT. Use for schema discovery, media-level train/val splitting, parallel conversion, rejection reporting, media validation, leakage audits, and normalizing every grounding coordinate to bbox_type=norm1000.
 ---
 
 # Multimodal ms-swift Conversion
@@ -41,7 +41,10 @@ For grounding:
 - Replace each `<bbox>` from `objects.bbox`.
 - Treat ref and bbox counts independently.
 - Accept only 2-value points or 4-value boxes.
-- Set `bbox_type` explicitly.
+- Normalize every retained coordinate to `objects.bbox_type="norm1000"`.
+- Convert `real` coordinates using the associated image dimensions and `norm1` by multiplying by 1000.
+- Keep coordinates in the 0..1000 range and preserve `xyxy` ordering for boxes.
+- Use `scripts/normalize_bbox_norm1000.py` as the deterministic post-processing step.
 - Provide `image_id` for multi-image real-coordinate boxes.
 - Reject structurally invalid or materially out-of-range coordinates.
 
@@ -60,6 +63,7 @@ Assert:
 - train and val share no media ID, lineage root or content hash;
 - message roles and media placeholders are valid;
 - object placeholder counts and coordinate ranges are valid;
+- every retained grounding row has `objects.bbox_type="norm1000"` and all coordinates in 0..1000;
 - local media exists and decodes;
 - source accounting balances;
 - repeated runs and different worker counts produce identical split mappings.

@@ -46,10 +46,24 @@ GROUNDING_PROMPT_RE = re.compile(
     r'\b(?:locate|localize|localise|localization|localisation|bounding[ _-]?box|bbox|coordinates?)\b',
     re.IGNORECASE)
 BOX_KEYS = ('bbox_2d', 'bounding_box', 'bbox', 'box')
+DEFAULT_POINT_THRESHOLDS = (0.02, 0.05, 0.10)
+POINT_KEYS = ('point_2d', 'click_point', 'point')
+POINT_PAIR_RE = re.compile(rf'[\[(]\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*[\])]')
+POINT_KEY_RE = re.compile(
+    rf'(?:point_2d|click_point|point)\s*["\']?\s*[:=]\s*'
+    rf'[\[(]\s*({NUMBER_RE})\s*,\s*({NUMBER_RE})\s*[\])]', re.IGNORECASE)
+
+
+def _point_threshold_key(value: float) -> str:
+    return f'{value:.2f}'.replace('.', '_')
+
+
+POINT_ACC_COLUMNS = tuple(f'point_acc_{_point_threshold_key(value)}' for value in DEFAULT_POINT_THRESHOLDS)
 PREDICTION_COLUMNS = ('model', 'dataset', 'sample_id', 'line_number', 'task', 'question', 'reference', 'prediction',
                       'error', 'exact_match', 'vqa_accuracy', 'token_f1', 'answer_type', 'answer_accuracy',
                       'semantic_similarity', 'rouge_l', 'bleu_4', 'chrf', 'pred_boxes', 'gt_boxes', 'mean_iou',
-                      'iou_accuracy', 'parse_success')
+                      'iou_accuracy', 'parse_success', *POINT_ACC_COLUMNS, 'mean_point_distance',
+                      'point_parse_success', 'gt_point_count', 'pred_point_count')
 
 NUMBER_WORDS = {
     'zero': '0',
@@ -139,6 +153,13 @@ class EvalConfig:
     min_video_batch_size: int = 1
     iou_threshold: float = 0.5
     prediction_space: str = 'norm1000'
+    point_thresholds: Tuple[float, ...] = DEFAULT_POINT_THRESHOLDS
+    plot_every: int = 10
+    plot_dir: Optional[Path] = None
+    wandb_project: Optional[str] = None
+    wandb_entity: Optional[str] = None
+    wandb_run_id: Optional[str] = None
+    wandb_run_name: Optional[str] = None
     trust_remote_code: bool = False
     progress_every: int = 10
     continue_on_error: bool = False
@@ -189,6 +210,18 @@ class ScoreAccumulator:
         self.vqa_failed_samples = 0
         self.description_failed_samples = 0
         self.grounding_failed_samples = 0
+        self.point_samples = 0
+        self.point_parse_success = 0
+        self.point_gt_total = 0
+        self.point_pred_total = 0
+        self.point_matched_total = 0
+        self.point_distance_sum = 0.0
+        self.point_hits = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.point_gt_counts = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.point_complete_samples = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.point_failed_samples = 0
+        self.iou_values: List[float] = []
+        self.point_distances: List[float] = []
         self.grounded_samples = 0
         self.grounded_description_token_f1_sum = 0.0
         self.grounded_rouge_l_sum = 0.0
@@ -202,6 +235,18 @@ class ScoreAccumulator:
         self.grounded_iou_hits = 0
         self.grounded_complete_samples = 0
         self.grounded_failed_samples = 0
+        self.grounded_point_samples = 0
+        self.grounded_point_parse_success = 0
+        self.grounded_point_gt_total = 0
+        self.grounded_point_pred_total = 0
+        self.grounded_point_matched_total = 0
+        self.grounded_point_distance_sum = 0.0
+        self.grounded_point_hits = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.grounded_point_gt_counts = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.grounded_point_complete_samples = {_point_threshold_key(value): 0 for value in DEFAULT_POINT_THRESHOLDS}
+        self.grounded_point_failed_samples = 0
+        self.grounded_iou_values: List[float] = []
+        self.grounded_point_distances: List[float] = []
 
     def add_vqa(self, scores: Mapping[str, Any], failed: bool = False) -> None:
         self.vqa_samples += 1
@@ -237,6 +282,27 @@ class ScoreAccumulator:
         self.iou_hits += int(scores['iou_hits'])
         self.complete_samples += int(scores['complete'])
         self.grounding_failed_samples += int(failed)
+        self.point_samples += 1
+        self.point_parse_success += int(scores.get('point_parse_success', 0))
+        self.point_gt_total += int(scores.get('gt_point_count', 0))
+        self.point_pred_total += int(scores.get('pred_point_count', 0))
+        self.point_matched_total += int(scores.get('matched_point_count', 0))
+        self.point_distance_sum += float(scores.get('mean_point_distance', 0.0)) * int(
+            scores.get('matched_point_count', 0))
+        for key, hits in (scores.get('point_hit_counts') or {}).items():
+            if key in self.point_hits:
+                self.point_hits[key] += int(hits)
+        for key, count in (scores.get('point_gt_counts') or {}).items():
+            if key in self.point_gt_counts:
+                self.point_gt_counts[key] += int(count)
+        for key, complete in (scores.get('point_complete') or {}).items():
+            if key in self.point_complete_samples:
+                self.point_complete_samples[key] += int(complete)
+        if scores.get('gt_box_count'):
+            self.iou_values.append(float(scores.get('mean_iou', 0.0)))
+        if scores.get('gt_point_count'):
+            self.point_distances.append(float(scores.get('mean_point_distance', 1.0)))
+        self.point_failed_samples += int(failed)
 
     def add_grounded(self, description: Mapping[str, float], grounding: Mapping[str, Any],
                      failed: bool = False) -> None:
@@ -253,6 +319,27 @@ class ScoreAccumulator:
         self.grounded_iou_hits += int(grounding['iou_hits'])
         self.grounded_complete_samples += int(grounding['complete'])
         self.grounded_failed_samples += int(failed)
+        self.grounded_point_samples += 1
+        self.grounded_point_parse_success += int(grounding.get('point_parse_success', 0))
+        self.grounded_point_gt_total += int(grounding.get('gt_point_count', 0))
+        self.grounded_point_pred_total += int(grounding.get('pred_point_count', 0))
+        self.grounded_point_matched_total += int(grounding.get('matched_point_count', 0))
+        self.grounded_point_distance_sum += float(grounding.get('mean_point_distance', 0.0)) * int(
+            grounding.get('matched_point_count', 0))
+        for key, hits in (grounding.get('point_hit_counts') or {}).items():
+            if key in self.grounded_point_hits:
+                self.grounded_point_hits[key] += int(hits)
+        for key, count in (grounding.get('point_gt_counts') or {}).items():
+            if key in self.grounded_point_gt_counts:
+                self.grounded_point_gt_counts[key] += int(count)
+        for key, complete in (grounding.get('point_complete') or {}).items():
+            if key in self.grounded_point_complete_samples:
+                self.grounded_point_complete_samples[key] += int(complete)
+        if grounding.get('gt_box_count'):
+            self.grounded_iou_values.append(float(grounding.get('mean_iou', 0.0)))
+        if grounding.get('gt_point_count'):
+            self.grounded_point_distances.append(float(grounding.get('mean_point_distance', 1.0)))
+        self.grounded_point_failed_samples += int(failed)
 
     def summary_rows(self, model: str, dataset: str) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
@@ -324,6 +411,13 @@ class ScoreAccumulator:
                 'sample_accuracy': _safe_div(self.complete_samples, self.grounding_samples),
                 'parse_success_rate': _safe_div(self.grounding_parse_success, self.grounding_samples),
                 'failed_samples': self.grounding_failed_samples,
+                'point_samples': self.point_samples,
+                'point_parse_success_rate': _safe_div(self.point_parse_success, self.point_samples),
+                'mean_point_distance': _safe_div(self.point_distance_sum, self.point_matched_total),
+                'point_acc_0_02': _safe_div(self.point_hits['0_02'], self.point_gt_counts['0_02']),
+                'point_acc_0_05': _safe_div(self.point_hits['0_05'], self.point_gt_counts['0_05']),
+                'point_acc_0_10': _safe_div(self.point_hits['0_10'], self.point_gt_counts['0_10']),
+                'point_failed_samples': self.point_failed_samples,
             })
         if self.grounded_samples:
             precision = _safe_div(self.grounded_iou_hits, self.grounded_pred_boxes)
@@ -346,6 +440,18 @@ class ScoreAccumulator:
                 'sample_accuracy': _safe_div(self.grounded_complete_samples, self.grounded_samples),
                 'parse_success_rate': _safe_div(self.grounded_parse_success, self.grounded_samples),
                 'failed_samples': self.grounded_failed_samples,
+                'point_samples': self.grounded_point_samples,
+                'point_parse_success_rate': _safe_div(
+                    self.grounded_point_parse_success, self.grounded_point_samples),
+                'mean_point_distance': _safe_div(
+                    self.grounded_point_distance_sum, self.grounded_point_matched_total),
+                'point_acc_0_02': _safe_div(
+                    self.grounded_point_hits['0_02'], self.grounded_point_gt_counts['0_02']),
+                'point_acc_0_05': _safe_div(
+                    self.grounded_point_hits['0_05'], self.grounded_point_gt_counts['0_05']),
+                'point_acc_0_10': _safe_div(
+                    self.grounded_point_hits['0_10'], self.grounded_point_gt_counts['0_10']),
+                'point_failed_samples': self.grounded_point_failed_samples,
             })
         return rows
 
@@ -591,25 +697,165 @@ def parse_prediction_boxes(value: Any) -> List[Tuple[float, float, float, float]
     return _deduplicate_boxes(boxes)
 
 
+def parse_prediction_points(value: Any) -> List[Tuple[float, float]]:
+    if isinstance(value, (dict, list, tuple)):
+        return _deduplicate_points(_points_from_structured(value))
+    text = final_answer_text(str(value or ''))
+    points: List[Tuple[float, float]] = []
+    for candidate in _structured_candidates(text):
+        points.extend(_points_from_structured(candidate))
+    if not points:
+        for segment in LEGACY_BOX_RE.findall(text):
+            points.extend(_points_from_text_segment(segment))
+    if not points:
+        points.extend(tuple(float(value_) for value_ in match.groups()) for match in POINT_KEY_RE.finditer(text))
+    if not points:
+        points = _points_from_text_segment(text)
+    return _deduplicate_points(points)
+
+
+def _points_from_structured(value: Any) -> List[Tuple[float, float]]:
+    if isinstance(value, str):
+        return _points_from_text_segment(value)
+    if isinstance(value, (list, tuple)):
+        if len(value) == 2 and all(_is_number(item) for item in value):
+            return [_coerce_point(value)]
+        points: List[Tuple[float, float]] = []
+        for item in value:
+            points.extend(_points_from_structured(item))
+        return points
+    if not isinstance(value, Mapping):
+        return []
+    points = []
+    recognized = False
+    for key in POINT_KEYS:
+        if key in value:
+            points.extend(_points_from_structured(value[key]))
+            recognized = True
+    if all(key in value and _is_number(value[key]) for key in ('x', 'y')):
+        points.append((float(value['x']), float(value['y'])))
+        recognized = True
+    if not recognized:
+        for item in value.values():
+            if isinstance(item, (Mapping, list, tuple)):
+                points.extend(_points_from_structured(item))
+    return points
+
+
+def _points_from_text_segment(text: str) -> List[Tuple[float, float]]:
+    if INLINE_BOX_RE.search(text) or PAIR_BOX_RE.search(text):
+        return []
+    points = [tuple(float(value) for value in match.groups()) for match in POINT_PAIR_RE.finditer(text)]
+    if points:
+        return points
+    numbers = [float(value) for value in re.findall(NUMBER_RE, text)]
+    return [tuple(numbers)] if len(numbers) == 2 else []
+
+
+def _normalize_point(point: Sequence[float], coordinate_space: str,
+                     image_size: Optional[Tuple[int, int]]) -> Tuple[float, float]:
+    x, y = [float(value) for value in point]
+    coordinate_space = coordinate_space.lower()
+    if coordinate_space in {'norm1000', 'normalized1000'}:
+        x, y = x / 1000, y / 1000
+    elif coordinate_space in {'real', 'absolute', 'pixel', 'pixels'}:
+        if image_size is None:
+            raise ValueError('Pixel-space points require a readable image to determine width and height.')
+        width, height = image_size
+        x, y = x / width, y / height
+    elif coordinate_space not in {'norm1', 'normalized'}:
+        raise ValueError(f'Unsupported coordinate space: {coordinate_space}.')
+    return min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
+
+
+def _point_distance(first: Sequence[float], second: Sequence[float]) -> float:
+    return math.hypot(first[0] - second[0], first[1] - second[1])
+
+
+def _match_points(predictions: Sequence[Sequence[float]],
+                  ground_truth: Sequence[Sequence[float]]) -> List[Tuple[int, int, float]]:
+    if not predictions or not ground_truth:
+        return []
+    cost_matrix = [[_point_distance(prediction, target) for target in ground_truth]
+                   for prediction in predictions]
+    return [(prediction_index, gt_index,
+             _point_distance(predictions[prediction_index], ground_truth[gt_index]))
+            for prediction_index, gt_index in _hungarian_minimize(cost_matrix)]
+
+
+def _point_scores(predicted: Sequence[Sequence[float]], ground_truth: Sequence[Sequence[float]],
+                  thresholds: Sequence[float]) -> Dict[str, Any]:
+    if not ground_truth:
+        return {
+            'pred_point_count': len(predicted),
+            'gt_point_count': 0,
+            'matched_point_count': 0,
+            'mean_point_distance': 0.0,
+            'point_parse_success': False,
+            'point_hit_counts': {_point_threshold_key(value): 0 for value in thresholds},
+            'point_gt_counts': {_point_threshold_key(value): 0 for value in thresholds},
+            'point_complete': {_point_threshold_key(value): 0 for value in thresholds},
+            'point_accuracies': {_point_threshold_key(value): 0.0 for value in thresholds},
+        }
+    matches = _match_points(predicted, ground_truth)
+    best = [1.0] * len(ground_truth)
+    for _, gt_index, distance in matches:
+        best[gt_index] = min(best[gt_index], distance)
+    hit_counts = {_point_threshold_key(value): sum(1 for distance in best if distance <= value)
+                  for value in thresholds}
+    gt_counts = {_point_threshold_key(value): len(ground_truth) for value in thresholds}
+    complete = {
+        _point_threshold_key(value): int(
+            all(distance <= value for distance in best) and len(predicted) == len(ground_truth))
+        for value in thresholds
+    }
+    return {
+        'pred_point_count': len(predicted),
+        'gt_point_count': len(ground_truth),
+        'matched_point_count': len(matches),
+        'mean_point_distance': _safe_div(sum(best), len(best)),
+        'point_parse_success': bool(predicted),
+        'point_hit_counts': hit_counts,
+        'point_gt_counts': gt_counts,
+        'point_complete': complete,
+        'point_accuracies': {key: _safe_div(hit_counts[key], gt_counts[key]) for key in hit_counts},
+    }
+
+
 def grounding_scores(record: Mapping[str, Any], prediction: str, prediction_space: str, iou_threshold: float,
-                     dataset_dir: Path) -> Dict[str, Any]:
+                     dataset_dir: Path,
+                     point_thresholds: Sequence[float] = DEFAULT_POINT_THRESHOLDS) -> Dict[str, Any]:
     objects = record.get('objects')
+    gt_boxes: List[Tuple[float, float, float, float]] = []
+    gt_points: List[Tuple[float, float]] = []
+    image_ids: List[int] = []
     if isinstance(objects, Mapping) and isinstance(objects.get('bbox'), list) and objects['bbox']:
-        gt_boxes = [_coerce_box(value) for value in objects['bbox']]
+        for value in objects['bbox']:
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                gt_points.append(_coerce_point(value))
+            else:
+                gt_boxes.append(_coerce_box(value))
         image_ids = objects.get('image_id') if isinstance(objects.get('image_id'), list) else []
-        image_ids = [int(value) for value in image_ids] + [0] * (len(gt_boxes) - len(image_ids))
+        image_ids = [int(value) for value in image_ids] + \
+            [0] * (len(gt_boxes) + len(gt_points) - len(image_ids))
         gt_space = str(objects.get('bbox_type') or 'real').lower()
-    else:
+    if not gt_boxes and not gt_points:
+        gt_points = []
+        gt_boxes = []
+        for reference in _reference_answers(record):
+            gt_boxes.extend(parse_prediction_boxes(reference))
+            gt_points.extend(parse_prediction_points(reference))
         gt_boxes = _deduplicate_boxes([
-            box
-            for reference in _reference_answers(record)
-            for box in parse_prediction_boxes(reference)
+            box for box in gt_boxes
         ])
-        if not gt_boxes:
-            raise ValueError('Grounding sample must contain objects.bbox or a parseable reference box.')
-        image_ids = [0] * len(gt_boxes)
+        gt_points = _deduplicate_points(gt_points)
+        if not gt_boxes and not gt_points:
+            raise ValueError('Grounding sample must contain objects.bbox or a parseable reference box/point.')
+        image_ids = [0] * (len(gt_boxes) + len(gt_points))
         gt_space = 'norm1000'
+
     pred_boxes = parse_prediction_boxes(prediction)
+    pred_points = parse_prediction_points(prediction) if not pred_boxes else []
     images = _image_values(record)
     normalized_gt = [
         _normalize_box(
@@ -627,19 +873,44 @@ def grounding_scores(record: Mapping[str, Any], prediction: str, prediction_spac
     for _, gt_index, iou in matches:
         best_ious[gt_index] = iou
     hits = sum(iou >= iou_threshold for _, _, iou in matches)
+    normalized_gt_points = [
+        _normalize_point(
+            point, gt_space,
+            _image_size(images[image_ids[len(gt_boxes) + index]], dataset_dir)
+            if gt_space in {'real', 'absolute', 'pixel', 'pixels'} else None)
+        for index, point in enumerate(gt_points)
+    ]
+    normalized_pred_points = [
+        _normalize_point(point, prediction_space,
+                         _image_size(images[0], dataset_dir) if prediction_space == 'real' else None)
+        for point in pred_points
+    ]
+    point_scores = _point_scores(normalized_pred_points, normalized_gt_points, point_thresholds)
+    if gt_boxes:
+        parse_success = bool(pred_boxes)
+        complete = hits == len(normalized_gt) and len(normalized_pred) == len(normalized_gt)
+    else:
+        primary_threshold = point_thresholds[1] if len(point_thresholds) > 1 else (
+            point_thresholds[0] if point_thresholds else 0.05)
+        primary_key = _point_threshold_key(primary_threshold)
+        parse_success = bool(pred_points)
+        complete = bool(point_scores['point_complete'].get(primary_key, 0))
     return {
         'pred_boxes': pred_boxes,
         'gt_boxes': gt_boxes,
         'best_ious': best_ious,
         'mean_iou': _safe_div(sum(best_ious), len(best_ious)),
         'iou_accuracy': _safe_div(hits, len(normalized_gt)),
-        'parse_success': bool(pred_boxes),
+        'parse_success': parse_success,
         'gt_box_count': len(normalized_gt),
         'pred_box_count': len(normalized_pred),
         'matched_box_count': len(matches),
         'iou_sum': sum(best_ious),
         'iou_hits': hits,
-        'complete': hits == len(normalized_gt) and len(normalized_pred) == len(normalized_gt),
+        'complete': complete,
+        'pred_points': pred_points,
+        'gt_points': gt_points,
+        **point_scores,
     }
 
 
@@ -711,6 +982,7 @@ def run_custom_eval(config: EvalConfig) -> List[Dict[str, Any]]:
                 result_stream.flush()
                 del batches[batch_key]
                 _report_progress(processed, config.progress_every, previous_processed=previous_processed)
+                _update_plots_and_wandb(config, accumulator, processed)
             for batch_key, batch in batches.items():
                 _trace_batch(batch_key, batch)
                 previous_processed = processed
@@ -721,6 +993,7 @@ def run_custom_eval(config: EvalConfig) -> List[Dict[str, Any]]:
                 result_stream.flush()
                 _report_progress(
                     processed, config.progress_every, previous_processed=previous_processed, force=True)
+                _update_plots_and_wandb(config, accumulator, processed, force=True)
     except (Exception, KeyboardInterrupt):
         if processed:
             _write_score_outputs(paths, accumulator, config, processed, complete=False)
@@ -891,6 +1164,10 @@ def _write_score_outputs(paths: Mapping[str, Path], accumulator: ScoreAccumulato
         'val_dataset': str(config.val_dataset),
         'iou_threshold': config.iou_threshold,
         'prediction_space': config.prediction_space,
+        'point_thresholds': [float(value) for value in config.point_thresholds],
+        'plot_dir': str(config.plot_dir) if config.plot_dir else None,
+        'wandb_project': config.wandb_project,
+        'wandb_run_id': config.wandb_run_id,
         'freeform_similarity_threshold': FREEFORM_SIMILARITY_THRESHOLD,
         'max_image_pixels': config.max_image_pixels,
         'min_video_frames': config.min_video_frames,
@@ -990,6 +1267,14 @@ def _process_batch(samples: Sequence[PreparedSample], model: Any, processor: Any
                 'iou_accuracy': scores['iou_accuracy'],
                 'parse_success': int(scores['parse_success']),
             })
+            for key, accuracy in scores['point_accuracies'].items():
+                row[f'point_acc_{key}'] = accuracy
+            row.update({
+                'mean_point_distance': scores['mean_point_distance'],
+                'point_parse_success': int(scores['point_parse_success']),
+                'gt_point_count': scores['gt_point_count'],
+                'pred_point_count': scores['pred_point_count'],
+            })
             accumulator.add_grounding(scores, failed=bool(error))
         elif sample.task == 'grounded':
             description = grounded_description_scores(prediction, sample.references)
@@ -1002,6 +1287,14 @@ def _process_batch(samples: Sequence[PreparedSample], model: Any, processor: Any
                 'mean_iou': grounding['mean_iou'],
                 'iou_accuracy': grounding['iou_accuracy'],
                 'parse_success': int(grounding['parse_success']),
+            })
+            for key, accuracy in grounding['point_accuracies'].items():
+                row[f'point_acc_{key}'] = accuracy
+            row.update({
+                'mean_point_distance': grounding['mean_point_distance'],
+                'point_parse_success': int(grounding['point_parse_success']),
+                'gt_point_count': grounding['gt_point_count'],
+                'pred_point_count': grounding['pred_point_count'],
             })
             accumulator.add_grounded(description, grounding, failed=bool(error))
         else:
@@ -2217,8 +2510,25 @@ def _coerce_box(value: Any) -> Tuple[float, float, float, float]:
     return tuple(float(item) for item in value)
 
 
+def _coerce_point(value: Any) -> Tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or not all(_is_number(item) for item in value):
+        raise ValueError(f'Point must contain two finite numbers: {value!r}.')
+    return tuple(float(item) for item in value)
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _deduplicate_points(points: Iterable[Sequence[float]]) -> List[Tuple[float, float]]:
+    result, seen = [], set()
+    for point in points:
+        point = _coerce_point(point)
+        key = tuple(round(value, 8) for value in point)
+        if key not in seen:
+            seen.add(key)
+            result.append(point)
+    return result
 
 
 def _deduplicate_boxes(boxes: Iterable[Sequence[float]]) -> List[Tuple[float, float, float, float]]:
@@ -2254,7 +2564,9 @@ def _write_scores_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     columns = ('model', 'dataset', 'task', 'num_samples', 'exact_match', 'vqa_accuracy', 'token_f1',
                'answer_accuracy', 'semantic_similarity', 'yes_no_samples', 'yes_no_accuracy', 'freeform_samples',
                'freeform_accuracy', 'freeform_similarity', 'rouge_l', 'bleu_4', 'chrf', 'mean_iou', 'iou_accuracy',
-               'grounding_precision', 'grounding_f1', 'sample_accuracy', 'parse_success_rate', 'failed_samples')
+               'grounding_precision', 'grounding_f1', 'sample_accuracy', 'parse_success_rate', 'failed_samples',
+               'point_samples', 'point_parse_success_rate', 'mean_point_distance',
+               'point_acc_0_02', 'point_acc_0_05', 'point_acc_0_10', 'point_failed_samples')
     with path.open('w', encoding='utf-8', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
@@ -2311,6 +2623,8 @@ def _validate_config(config: EvalConfig) -> None:
         raise ValueError('--min-video-batch-size must be greater than zero.')
     if not 0 <= config.iou_threshold <= 1:
         raise ValueError('--iou-threshold must be between zero and one.')
+    if config.plot_every <= 0:
+        raise ValueError('--plot-every must be greater than zero.')
 
 
 def _guard_outputs(paths: Iterable[Path], overwrite: bool) -> None:
@@ -2327,6 +2641,123 @@ def _report_progress(
     )
     if force or crossed_interval or (interval > 0 and previous_processed is None and processed % interval == 0):
         print(f'[custom-eval] processed={processed}', file=sys.stderr, flush=True)
+
+
+_wandb_run_cache = None
+
+
+def _ensure_wandb(config: EvalConfig) -> Any:
+    global _wandb_run_cache
+    if _wandb_run_cache is not None or not config.wandb_project:
+        return _wandb_run_cache
+    try:
+        import wandb
+    except ImportError as error:
+        print(f'[custom-eval] wandb unavailable; continue without W&B: {error}', file=sys.stderr, flush=True)
+        return None
+    _wandb_run_cache = wandb.init(
+        project=config.wandb_project,
+        entity=config.wandb_entity,
+        id=config.wandb_run_id,
+        name=config.wandb_run_name,
+        resume='allow',
+        job_type='eval-custom',
+    )
+    return _wandb_run_cache
+
+
+def _current_wandb_logs(accumulator: ScoreAccumulator) -> Dict[str, float]:
+    logs = {
+        'eval/mean_iou': _safe_div(accumulator.iou_sum, accumulator.gt_boxes),
+        'eval/iou_accuracy': _safe_div(accumulator.iou_hits, accumulator.gt_boxes),
+        'eval/mean_point_distance': _safe_div(
+            accumulator.point_distance_sum, accumulator.point_matched_total),
+    }
+    for threshold in DEFAULT_POINT_THRESHOLDS:
+        key = _point_threshold_key(threshold)
+        logs[f'eval/point_acc_{key}'] = _safe_div(
+            accumulator.point_hits[key], accumulator.point_gt_counts[key])
+    return logs
+
+
+def _render_progress_plots(config: EvalConfig, accumulator: ScoreAccumulator) -> Dict[str, Path]:
+    if config.plot_dir is None:
+        return {}
+    config.plot_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as error:
+        print(f'[custom-eval] matplotlib unavailable; skip local plots: {error}', file=sys.stderr, flush=True)
+        return {}
+
+    outputs: Dict[str, Path] = {}
+    iou_values = accumulator.iou_values
+    if iou_values:
+        xs = list(range(1, len(iou_values) + 1))
+        running = [sum(iou_values[:index]) / index for index in range(1, len(iou_values) + 1)]
+        figure, axis = plt.subplots(figsize=(8, 4))
+        axis.plot(xs, iou_values, marker='.', label='sample mIoU')
+        axis.plot(xs, running, label='running mean')
+        axis.axhline(
+            y=_safe_div(accumulator.iou_sum, accumulator.gt_boxes),
+            color='red', linestyle='--', label='overall mIoU')
+        axis.set_title('Grounding IoU by sample')
+        axis.set_xlabel('grounding sample')
+        axis.set_ylabel('IoU')
+        axis.legend()
+        figure.tight_layout()
+        path = config.plot_dir / 'iou.png'
+        figure.savefig(path, dpi=120)
+        plt.close(figure)
+        outputs['iou'] = path
+
+    point_distances = accumulator.point_distances
+    if point_distances:
+        xs = list(range(1, len(point_distances) + 1))
+        figure, axis = plt.subplots(figsize=(8, 4))
+        axis.plot(xs, point_distances, marker='.', label='sample mean distance')
+        for threshold in DEFAULT_POINT_THRESHOLDS:
+            running_acc = [
+                sum(1 for distance in point_distances[:index] if distance <= threshold) / index
+                for index in range(1, len(point_distances) + 1)
+            ]
+            axis.plot(xs, running_acc, label=f'acc@{threshold:.2f}')
+        axis.set_title('Point accuracy by sample')
+        axis.set_xlabel('point sample')
+        axis.set_ylabel('normalized distance / accuracy')
+        axis.legend()
+        figure.tight_layout()
+        path = config.plot_dir / 'point_acc.png'
+        figure.savefig(path, dpi=120)
+        plt.close(figure)
+        outputs['point_acc'] = path
+    return outputs
+
+
+def _update_plots_and_wandb(config: EvalConfig, accumulator: ScoreAccumulator,
+                            processed: int, force: bool = False) -> None:
+    if config.plot_every > 0 and not force and processed % config.plot_every != 0:
+        return
+    plots = _render_progress_plots(config, accumulator)
+    if not config.wandb_project:
+        return
+    run = _ensure_wandb(config)
+    if run is None:
+        return
+    import wandb
+    logs = _current_wandb_logs(accumulator)
+    logs['eval/processed'] = processed
+    for key, path in plots.items():
+        logs[f'eval/{key}_plot'] = wandb.Image(str(path))
+    run.log(logs, step=processed)
+    print(
+        f'[custom-eval] wandb step={processed} '
+        f'mean_iou={logs["eval/mean_iou"]:.4f} '
+        f'point_acc_0_05={logs["eval/point_acc_0_05"]:.4f}',
+        file=sys.stderr, flush=True,
+    )
 
 
 def _safe_div(numerator: float, denominator: float) -> float:

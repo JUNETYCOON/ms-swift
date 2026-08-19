@@ -65,9 +65,11 @@ TASK_LABELS = {
     "molmo2-video-capqa": "视频描述 / 问答",
     "molmo2-video-point": "视频指点定位",
     "molmo2-video-subtitleqa": "视频字幕问答",
+    "molmo2-video-track": "视频跟踪",
     "pixmo-cap": "图像描述",
     "pixmo-points": "图像指点定位",
     "llava": "多任务视觉指令微调",
+    "coco": "多标签图像识别 / 描述式指令",
 }
 
 MEDIA_STATUS_LABELS = {
@@ -175,17 +177,27 @@ def page_shell(title: str, intro: str, body: str, *, script: str = "") -> str:
 def sample_media(dataset: str, row: dict[str, Any]) -> str:
     assets = [asset for asset in row.get("media_assets") or [] if asset.get("archive_path")]
     if not assets:
-        label = MEDIA_STATUS_LABELS.get(str(row.get("media_status")), "无可展示媒体")
+        label = MEDIA_STATUS_LABELS.get(str(row.get("media_status")), "??????")
         return f'<div class="sample-media"><div class="media-empty"><b>{esc(label)}</b></div></div>'
     rendered = []
     for asset in assets:
         relative = f"sub-dataset/{dataset}/{asset['archive_path']}"
         source = asset.get("source_remote") or asset.get("source") or ""
         media_type = asset.get("type")
-        label = "视频的 6 帧均匀采样预览（派生媒体）" if media_type == "videos" else "转换记录引用的原图"
+        if asset.get("gt_overlay"):
+            label = "GT ??????????????????"
+        elif media_type == "videos":
+            label = "??????????"
+        else:
+            label = "?????????"
+        clean = asset.get("clean_archive_path")
+        clean_link = ""
+        if clean:
+            clean_relative = f"sub-dataset/{dataset}/{clean}"
+            clean_link = f'<br><a href="{quote(clean_relative)}">???????</a>'
         rendered.append(
-            f'<div class="media-item"><a href="{quote(relative)}"><img loading="lazy" src="{quote(relative)}" alt="{esc(row["sample_id"])} 媒体"></a>'
-            f'<div class="media-label">{esc(label)}<br>{esc(source)}</div></div>'
+            f'<div class="media-item"><a href="{quote(relative)}"><img loading="lazy" src="{quote(relative)}" alt="{esc(row["sample_id"])} ??"></a>'
+            f'<div class="media-label">{esc(label)}<br>{esc(source)}{clean_link}</div></div>'
         )
     css = "one" if len(rendered) == 1 else ""
     return f'<div class="sample-media"><div class="media-grid {css}">{"".join(rendered)}</div></div>'
@@ -206,17 +218,21 @@ def sample_card(dataset: str, row: dict[str, Any]) -> str:
     refs_html = "".join(
         f'<li><b>{esc(item.get("type"))}</b> <code>{esc(item.get("reference"))}</code></li>'
         for item in references
-    ) or "<li>无媒体引用</li>"
+    ) or "<li>?????</li>"
     errors_html = (
         '<ul class="error-list">' + "".join(f"<li>{esc(error)}</li>" for error in errors) + "</ul>"
-        if errors else '<span class="status ok">通过</span>'
+        if errors else '<span class="status ok">??</span>'
     )
     record_link = f"sub-dataset/{dataset}/{row['record_archive_path']}"
+    raw_record = row.get("raw_record")
+    raw_record_html = esc(pretty(raw_record if raw_record is not None else {"unavailable": record_link}))
+    overlay_html = esc(pretty(row.get("ground_truth_overlay") or []))
     return f"""<article class="sample" data-search="{esc(search_text)}" data-status="{esc(status)}" data-split="{esc(row.get('split'))}" data-format="{format_state}">
-{sample_media(dataset, row)}<div class="sample-body"><div class="sample-head"><div><div class="sample-id">{esc(row['sample_id'])}</div><div class="source">population #{n(row.get('population_index'))} · {esc(row.get('source_file'))}:{n(row.get('line_number'))}</div></div>
-<div class="chips"><span class="chip">{esc(row.get('split'))}</span><span class="chip">{esc(MEDIA_STATUS_LABELS.get(status, status))}</span><span class="chip">{'格式异常' if errors else '格式通过'}</span></div></div>
-<dl class="qa"><dt>用户输入</dt><dd><pre>{esc(row.get('input_preview'))}</pre></dd><dt>助手输出</dt><dd><pre>{esc(row.get('output_preview'))}</pre></dd></dl>
-<details class="details"><summary>格式、对象与媒体证据</summary><h3>格式检查</h3>{errors_html}<h3>媒体引用</h3><ul class="media-paths">{refs_html}</ul><h3>对象监督</h3><pre>{esc(pretty(row.get('objects')))}</pre><h3>其他字段</h3><pre>{esc(pretty(row.get('metadata_preview')))}</pre><p><a href="{quote(record_link)}">查看未改写的完整转换记录 JSON</a></p></details></div></article>"""
+{sample_media(dataset, row)}<div class="sample-body"><div class="sample-head"><div><div class="sample-id">{esc(row['sample_id'])}</div><div class="source">population #{n(row.get('population_index'))} ? {esc(row.get('source_file'))}:{n(row.get('line_number'))}</div></div>
+<div class="chips"><span class="chip">{esc(row.get('split'))}</span><span class="chip">{esc(MEDIA_STATUS_LABELS.get(status, status))}</span><span class="chip">{'????' if errors else '????'}</span></div></div>
+<dl class="qa"><dt>????</dt><dd><pre>{esc(row.get('input_preview'))}</pre></dd><dt>????</dt><dd><pre>{esc(row.get('output_preview'))}</pre></dd></dl>
+<details class="details" open><summary>?????? JSON??????</summary><pre>{raw_record_html}</pre><p><a href="{quote(record_link)}">???? JSON ??</a></p></details>
+<details class="details"><summary>??????????</summary><h3>????</h3>{errors_html}<h3>????</h3><ul class="media-paths">{refs_html}</ul><h3>GT overlay ??</h3><pre>{overlay_html}</pre><h3>????</h3><pre>{esc(pretty(row.get('objects')))}</pre><h3>????</h3><pre>{esc(pretty(row.get('metadata_preview')))}</pre></details></div></article>"""
 
 
 def media_table(summary: dict[str, Any]) -> str:
@@ -359,6 +375,10 @@ def pixmo_index_table(post_media: dict[str, Any], overall: dict[str, Any]) -> st
 
 def index_report(root: Path, overall: dict[str, Any], post_media: dict[str, Any], post_entry: dict[str, Any]) -> str:
     datasets = overall["datasets"]
+    dataset_count = len(datasets)
+    eval_count = int((post_entry.get("eval_count") or 0))
+    manifest_label = overall.get("manifest_label") or Path(str(overall.get("manifest") or "")).name
+    train_input_label = overall.get("train_input_label") or "source_train"
     total_population = sum(int(item.get("population_total") or 0) for item in datasets)
     valid_rows = sum(int(item.get("format", {}).get("valid_format_rows") or 0) for item in datasets)
     format_issue_datasets = sum(bool(item.get("format", {}).get("format_error_counts") or item.get("format", {}).get("json_error_counts")) for item in datasets)
@@ -398,11 +418,11 @@ def index_report(root: Path, overall: dict[str, Any], post_media: dict[str, Any]
     entry_css = "ok" if validator_passed and current_ready == len(datasets) else "bad"
     body = f"""
 <div class="summary-grid"><div class="metric"><b>{n(len(datasets))}</b><span>纳入数据集</span></div><div class="metric"><b>{n(total_population)}</b><span>全量扫描逻辑行</span></div><div class="metric"><b>{n(overall.get('displayed_rows_total'))}</b><span>HTML 展示样本</span></div><div class="metric"><b>{n(current_ready)}/{n(len(datasets))}</b><span>当前正式入口可用</span></div><div class="metric"><b>{n(format_issue_datasets)}</b><span>含结构异常的数据集</span></div></div>
-<div class="notice {format_notice_class}"><b>总体判断：</b>{n(len(datasets))} 个稳定 source_train + eval population 共 {n(total_population)} 行，其中 {n(valid_rows)} 行通过结构检查，{n(invalid_format_rows)} 行存在结构异常。所有本地媒体引用均存在，本地缺失数据集数为 {n(missing_datasets)}；{n(remote_datasets)} 个数据集仍含远程 URL。远程 URL 不等于媒体已本地化，PixMo 的最终下载比例在下表单列。</div>
-<section><h2>一、17 个数据集总览</h2><div class="table-wrap"><table class="compact"><thead><tr><th>数据集 / 任务</th><th>population</th><th>结构</th><th>媒体</th><th>当前入口</th><th>100 条样本媒体状态</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
-<section><h2>二、正式入口时间边界</h2><div class="notice {entry_css}"><b>当前结论：</b>官方 <code>validate_sft_entrypoints.py</code> 返回码为 {n(post_entry.get('official_validator_returncode'))}，17 个 train 与 18 个 eval 入口校验通过。<a href="entrypoint-validation.json">查看完整输出</a></div><p>全量采集开始时 <code>global_media_dedup.py</code> 尚在运行，所以逐数据集采集快照只观察到 {n(collection_ready)}/17 个 global_train；去重完成后于 {esc(post_entry.get('checked_at'))} 重新运行官方校验，当前状态为 {n(current_ready)}/17。报告不把采集时快照误写成当前状态。</p></section>
+<div class="notice {format_notice_class}"><b>总体判断：</b>{n(dataset_count)} 个稳定 {esc(train_input_label)} + eval population 共 {n(total_population)} 行，其中 {n(valid_rows)} 行通过结构检查，{n(invalid_format_rows)} 行存在结构异常。所有本地媒体引用均存在，本地缺失数据集数为 {n(missing_datasets)}；{n(remote_datasets)} 个数据集仍含远程 URL。远程 URL 不等于媒体已本地化，PixMo 的最终下载比例在下表单列。</div>
+<section><h2>一、{n(dataset_count)} 个数据集总览</h2><div class="table-wrap"><table class="compact"><thead><tr><th>数据集 / 任务</th><th>population</th><th>结构</th><th>媒体</th><th>当前入口</th><th>100 条样本媒体状态</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
+<section><h2>二、正式入口时间边界</h2><div class="notice {entry_css}"><b>当前结论：</b>官方 <code>validate_sft_entrypoints.py</code> 返回码为 {n(post_entry.get('official_validator_returncode'))}，{n(dataset_count)} 个 train 与 {n(eval_count)} 个 eval 入口校验通过。<a href="entrypoint-validation.json">查看完整输出</a></div><p>本报告以 <code>{esc(manifest_label)}</code> 为准，逐数据集采集快照观察到 {n(collection_ready)}/{n(dataset_count)} 个训练入口；于 {esc(post_entry.get('checked_at'))} 重新运行官方校验，当前状态为 {n(current_ready)}/{n(dataset_count)}。报告不把采集时快照误写成当前状态。</p></section>
 <section><h2>三、PixMo 下载与本地化</h2><div class="table-wrap"><table><thead><tr><th>数据集</th><th>下载成功 / 唯一媒体</th><th>失败</th><th>状态分布</th><th>固定 100 条当前展示状态</th><th>更新时间</th></tr></thead><tbody>{pixmo_index_table(post_media,overall)}</tbody></table></div><p class="muted">固定 100 条 sample_id 未改变。下载完成后仅补充已落盘的原图：PixMo-Cap 从 15 条可展示增至 46 条，PixMo-Points 从 28 条增至 48 条。</p></section>
-<section><h2>四、审计口径</h2><div class="method"><div><b>范围</b><p>以服务器 curated manifest 的 17 个启用项为准，显式排除 Molmo2-VideoTrack、备份、smoke、工具与派生报告目录。</p></div><div><b>全量检查</b><p>逐行解析 source_train/eval，核对 messages、role、媒体有序数组、占位符和 grounding 对象；唯一媒体路径做存在性快照。</p></div><div><b>100 条展示</b><p>每项使用独立固定 seed，从完整 logical-record population 确定性抽样，不因媒体缺失而替换。</p></div></div><h3>采集开始时的并行进程</h3><pre class="notice">{esc(processes)}</pre></section>
+<section><h2>四、审计口径</h2><div class="method"><div><b>范围</b><p>以服务器 <code>{esc(manifest_label)}</code> 的 {n(dataset_count)} 个启用项为准；备份、smoke、工具与派生报告目录只列为排除项。</p></div><div><b>全量检查</b><p>逐行解析 {esc(train_input_label)} 和 eval，核对 messages、role、媒体有序数组、占位符和 grounding 对象；唯一媒体路径做存在性快照。</p></div><div><b>100 条展示</b><p>每项使用独立固定 seed，从完整 logical-record population 确定性抽样，不因媒体缺失而替换。</p></div></div><h3>采集开始时的并行进程</h3><pre class="notice">{esc(processes)}</pre></section>
 <section><h2>五、交付验证</h2><div class="table-wrap"><table><thead><tr><th>验证面</th><th>结果</th><th>证据</th></tr></thead><tbody>
 <tr><td>logical-record 专用结构校验</td><td>{status_chip('通过' if delivery_validation.get('status') == 'passed' else '未通过','ok' if delivery_validation.get('status') == 'passed' else 'bad')}</td><td>{n(delivery_validation.get('datasets'))} 个数据集，{n(delivery_validation.get('displayed_samples'))} 条展示样本，{n(delivery_validation.get('candidate_rows'))} 个候选分区。<a href="validation.json">查看结果</a></td></tr>
 <tr><td>浏览器双视口校验</td><td>{status_chip('通过' if browser_validation.get('status') == 'passed' else '未通过','ok' if browser_validation.get('status') == 'passed' else 'bad')}</td><td>{n(browser_validation.get('html_pages'))} 个页面，{n(browser_validation.get('viewport_checks'))} 次检查。<a href="browser-validation.json">查看结果</a></td></tr>
@@ -412,7 +432,7 @@ def index_report(root: Path, overall: dict[str, Any], post_media: dict[str, Any]
     (root / "audit-findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return page_shell(
         "ms-swift 转换数据复核总览",
-        "排除 Molmo2-VideoTrack；全量复核其余 17 个正式转换数据集，并为每项展示 100 条确定性抽样记录。",
+        f"以 {manifest_label} 为准，全量复核 {dataset_count} 个训练入口及对应 eval，并为每项展示 100 条确定性抽样记录。",
         body,
     )
 

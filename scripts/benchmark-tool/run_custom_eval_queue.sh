@@ -15,6 +15,8 @@ ONLY_DATASET=${1:-}
 LOG_ROOT=${CONTROL_ROOT}/logs/custom
 STATUS_FILE=${CONTROL_ROOT}/custom-status.tsv
 GPU_LOG=${CONTROL_ROOT}/gpu-memory.csv
+PLOT_EVERY=${PLOT_EVERY:-200}
+WANDB_PROJECT=${WANDB_PROJECT:-}
 mkdir -p "${LOG_ROOT}" "${RESULT_ROOT}" "${CONTROL_ROOT}"
 
 if [[ ! -f "${STATUS_FILE}" ]]; then
@@ -113,10 +115,19 @@ run_one() {
         --device cuda:0
         --attn-implementation sdpa
         --progress-every 200
+        --plot-every "${PLOT_EVERY}"
+        --plot-dir "${output_dir}/plots"
         --continue-on-error
         --resume
         --retry-errors
     )
+    if [[ -n "${WANDB_PROJECT}" ]]; then
+        command+=(--wandb-project "${WANDB_PROJECT}")
+        command+=(--wandb-run-name "${model_label}-${dataset}-${attempt}")
+        if [[ -n "${WANDB_RUN_ID:-}" ]]; then
+            command+=(--wandb-run-id "${WANDB_RUN_ID}")
+        fi
+    fi
     if [[ -n "${max_video_frames}" ]]; then
         command+=(--max-video-frames "${max_video_frames}")
     fi

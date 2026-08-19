@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:stage1:s1-udf:manifest:1.0.0",
+  "title": "Stage1 Universal Dataset Format manifest",
+  "type": "object",
+  "required": [
+    "format", "schema_version", "dataset", "record_files", "task_types", "grouping", "statistics"
+  ],
+  "properties": {
+    "format": {"const": "s1-udf"},
+    "schema_version": {"const": "1.0.0"},
+    "dataset": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string"},
+        "description": {"type": "string"},
+        "homepage": {"type": "string"},
+        "license": {"type": "string"},
+        "citation": {"type": "string"},
+        "revision": {"type": "string"},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "record_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "format", "count", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "format": {"enum": ["jsonl", "json", "parquet"]},
+          "split": {"type": "string", "minLength": 1},
+          "count": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+          "metadata": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "task_types": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "splits": {
+      "type": "object",
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "taxonomies": {"type": "array", "items": {"type": "object"}},
+    "coordinate_conventions": {"type": "array", "items": {"type": "object"}},
+    "source_schemas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "fingerprint"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "version": {"type": "string"},
+          "format": {"type": "string"},
+          "uri": {"type": "string"},
+          "fingerprint": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+          "fingerprint_algorithm": {"const": "sha256"},
+          "fields": {"type": "array", "items": {"type": "object"}},
+          "evidence": {"type": "object"},
+          "metadata": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "grouping": {
+      "type": "object",
+      "required": ["field", "semantics", "identity_fields"],
+      "properties": {
+        "field": {"const": "group_id"},
+        "semantics": {"type": "string", "minLength": 1},
+        "identity_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "allOf": [
+            {"contains": {"const": "group_id"}},
+            {"contains": {"const": "assets[].sha256"}},
+            {"contains": {"const": "assets[].source_identities[]"}},
+            {"contains": {"const": "assets[].uri"}},
+            {"contains": {"const": "assets[].source_ref"}},
+            {"contains": {"const": "episode.id"}}
+          ]
+        },
+        "seed": {"type": "integer"},
+        "metadata": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "provenance": {"type": "object"},
+    "statistics": {
+      "type": "object",
+      "required": ["records", "groups", "unique_assets", "episodes"],
+      "properties": {
+        "records": {"type": "integer", "minimum": 1},
+        "groups": {"type": "integer", "minimum": 1},
+        "unique_assets": {"type": "integer", "minimum": 0},
+        "episodes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "extensions": {"type": "object"}
+  },
+  "additionalProperties": false
+}

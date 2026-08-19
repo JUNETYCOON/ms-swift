@@ -51,7 +51,7 @@ baseline /mnt/luojunkun/stage1/model
 ours     /mnt/luojunkun/stage1/sft-model/7-30_stage1_modelv1
 ```
 
-在评测前先运行 `scripts/audit_robovqa_contamination.py`，确认参考答案没有 `<think>/<answer>`、格式说明或元推理残留。`predictions.jsonl` 会保存推理当时的 reference，之后只修改源数据不会自动修正旧预测文件里的 reference。
+在评测前先运行 `scripts/data-process/audit_robovqa_contamination.py`，确认参考答案没有 `<think>/<answer>`、格式说明或元推理残留。`predictions.jsonl` 会保存推理当时的 reference，之后只修改源数据不会自动修正旧预测文件里的 reference。
 
 下面的 smoke 参数为 batch 2、最多生成 64 tokens、最多抽 16 帧、前 256 行。两个模型按命令调用顺序执行，不会同时占用显存；输出目录彼此隔离：
 

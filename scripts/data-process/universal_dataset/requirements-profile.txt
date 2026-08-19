@@ -1,0 +1,6 @@
+-r requirements.txt
+pyarrow>=14,<23
+numpy>=1.24,<3
+h5py>=3.9,<4
+ijson>=3.2,<4
+google-crc32c>=1.5,<2
