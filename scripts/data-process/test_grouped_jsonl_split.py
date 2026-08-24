@@ -13,7 +13,7 @@ for value in (str(SCRIPTS), str(SPLIT)):
     if value not in sys.path:
         sys.path.insert(0, value)
 
-from grouped_jsonl_split import media_hash_group_resolver, split_jsonl
+from grouped_jsonl_split import image_stem_group, media_hash_group_resolver, split_jsonl
 from split_robo2vlm import episode_group
 
 
@@ -87,6 +87,40 @@ class GroupedSplitTest(unittest.TestCase):
             )
             self.assertEqual(report["groups"]["present_in_multiple_source_files"], 1)
             self.assertEqual(report["groups"]["train_eval_overlap"], 0)
+
+    def test_force_train_keeps_shared_images_out_of_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.jsonl"
+            rows = [
+                {"id": "shared", "image_id": 11, "images": ["gqa/11.jpg"]},
+                {"id": "unique-eval", "image_id": 33, "images": ["vg/33.jpg"]},
+            ]
+            write_jsonl(source, rows)
+            report = split_jsonl(
+                input_paths=[source],
+                train_output=root / "train.jsonl",
+                eval_output=root / "eval.jsonl",
+                report_output=root / "report.json",
+                group_resolver=image_stem_group,
+                group_key_description="image stem",
+                eval_ratio=0.99,
+                seed=42,
+                force_train_groups={"11"},
+                overwrite=True,
+            )
+            self.assertEqual([row["id"] for row in read_jsonl(root / "train.jsonl")], ["shared"])
+            self.assertEqual([row["id"] for row in read_jsonl(root / "eval.jsonl")], ["unique-eval"])
+            self.assertEqual(report["rows"]["forced_train"], 1)
+            self.assertEqual(report["groups"]["train_eval_overlap"], 0)
+
+    def test_image_stem_group_normalizes_numeric_ids(self) -> None:
+        record = {"image_id": "0007", "images": ["/data/VG_100K/7.jpg"]}
+        self.assertEqual(image_stem_group(record, Path("/tmp/demo.jsonl")), "7")
+        self.assertEqual(
+            image_stem_group({"images": ["gqa/images/train_balanced/7.jpg"]}, Path("/tmp/demo.jsonl")),
+            "7",
+        )
 
     def test_existing_curators_can_import_shared_api(self) -> None:
         import curate_llava_sft  # noqa: F401

@@ -1,10 +1,13 @@
 {
   "version": 2,
-  "description": "Stage 1 DLC entrypoints. Reserve all eval media globally, remove train-vs-eval contamination, and retain cross-dataset train supervision.",
+  "description": "Stage 1 DLC entrypoints. Reserve same-dataset eval media, keep GQA/Visual Genome shared images in each train split, and retain cross-dataset train supervision.",
   "global_dedup": {
     "required": true,
     "require_media_identity": true,
     "deduplicate_cross_dataset_train": false,
+    "eval_overlap_exempt_groups": [
+      ["gqa", "visualgenome-qa", "visualgenome-regions"]
+    ],
     "training_priority": [
       "ai2d",
       "chartqa",

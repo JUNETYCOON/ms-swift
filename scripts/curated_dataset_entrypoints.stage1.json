@@ -4,6 +4,10 @@
   "global_dedup": {
     "required": true,
     "require_media_identity": true,
+    "deduplicate_cross_dataset_train": false,
+    "eval_overlap_exempt_groups": [
+      ["gqa", "visualgenome-qa", "visualgenome-regions"]
+    ],
     "training_priority": [
       "ai2d",
       "chartqa",
@@ -169,7 +173,8 @@
   "rules": [
     "Use only enabled dataset train entries for SFT and eval entries only for validation.",
     "Never train from source_only, source_train, or split_train paths.",
-    "A complete global dedup report with zero post-filter overlap is mandatory.",
+    "A complete global dedup report with zero non-exempt train/eval overlap is mandatory.",
+    "GQA and Visual Genome may keep the same photograph in each dataset's train split; only unique images are hashed into val.",
     "Any input modification after the global dedup report requires a full rerun."
   ]
 }

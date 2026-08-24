@@ -2,10 +2,12 @@
 """Materialize decontaminated SFT train entrypoints from a manifest.
 
 All enabled eval media are reserved first. Training datasets are then processed
-in explicit priority order. Rows that touch eval media are always excluded.
-Cross-dataset train media can either be assigned to the highest-priority dataset
-or retained in every dataset. Repeated QA rows on the same media inside one
-dataset remain intact.
+in explicit priority order. Rows that touch the same dataset's eval media are
+always excluded. Cross-dataset eval overlap can be exempted for related families
+such as GQA and Visual Genome, so shared images stay in each dataset's train
+split. Cross-dataset train media can either be assigned to the highest-priority
+dataset or retained in every dataset. Repeated QA rows on the same media inside
+one dataset remain intact.
 """
 
 from __future__ import annotations
@@ -685,6 +687,70 @@ def _conflict_payload(conflicts: Mapping[str, set[str]]) -> list[dict[str, Any]]
     ]
 
 
+def parse_eval_overlap_exempt_groups(
+    value: Any, enabled: Sequence[str]
+) -> tuple[frozenset[str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(
+            "global_dedup.eval_overlap_exempt_groups must be a list of dataset name lists"
+        )
+    enabled_names = set(enabled)
+    groups: list[frozenset[str]] = []
+    for index, group in enumerate(value):
+        if not isinstance(group, list) or len(group) < 2:
+            raise ValueError(
+                f"eval_overlap_exempt_groups[{index}] must contain at least two dataset names"
+            )
+        names: list[str] = []
+        for item in group:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    f"eval_overlap_exempt_groups[{index}] must contain non-empty dataset names"
+                )
+            names.append(item.strip())
+        if len(names) != len(set(names)):
+            raise ValueError(f"eval_overlap_exempt_groups[{index}] contains duplicate datasets")
+        unknown = sorted(set(names) - enabled_names)
+        if unknown:
+            raise ValueError(
+                f"eval_overlap_exempt_groups[{index}] contains disabled or unknown "
+                f"datasets: {unknown}"
+            )
+        groups.append(frozenset(names))
+    return tuple(groups)
+
+
+def eval_owner_is_exempt(
+    dataset: str,
+    owner: str,
+    groups: Sequence[frozenset[str]],
+) -> bool:
+    if dataset == owner:
+        return False
+    return any(dataset in group and owner in group for group in groups)
+
+
+def partition_eval_conflicts(
+    conflicts: Mapping[str, set[str]],
+    dataset: str,
+    groups: Sequence[frozenset[str]],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    blocking: dict[str, set[str]] = {}
+    exempted: dict[str, set[str]] = {}
+    for identity, owners in conflicts.items():
+        blocked_owners = {
+            owner for owner in owners if not eval_owner_is_exempt(dataset, owner, groups)
+        }
+        exempt_owners = set(owners) - blocked_owners
+        if blocked_owners:
+            blocking[identity] = blocked_owners
+        if exempt_owners:
+            exempted[identity] = exempt_owners
+    return blocking, exempted
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.progress_every < 0 or args.max_report_examples < 0:
         raise ValueError("progress and example limits must be non-negative")
@@ -702,6 +768,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             "global_dedup.deduplicate_cross_dataset_train must be a boolean"
         )
+    eval_overlap_exempt_groups = parse_eval_overlap_exempt_groups(
+        policy.get("eval_overlap_exempt_groups"),
+        priority,
+    )
     base = manifest_path.parent
     report_output = canonical_path(
         args.report_output or policy.get("report", "global_media_dedup_report.json"), base
@@ -828,7 +898,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         )
                 if any(identity.startswith("text:sha256:") for identity in identities):
                     counts["train_text_only_rows"] += 1
-                eval_conflicts = store.lookup("eval_identity", identities)
+                eval_conflicts, exempt_eval_conflicts = partition_eval_conflicts(
+                    store.lookup("eval_identity", identities),
+                    spec.name,
+                    eval_overlap_exempt_groups,
+                )
                 owner_conflicts = {
                     identity: owners
                     for identity, owners in store.lookup("train_owner", identities).items()
@@ -867,6 +941,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     if owner_conflicts:
                         counts["retained_cross_dataset_train_overlap_rows"] += 1
                         global_stats["retained_cross_dataset_train_overlap_rows"] += 1
+                    if exempt_eval_conflicts:
+                        counts["retained_exempt_eval_overlap_rows"] += 1
+                        global_stats["retained_exempt_eval_overlap_rows"] += 1
                     if not args.audit_only:
                         streams[spec.name].write(line)
                     store.add_owner("train_owner", identities, spec.name)
@@ -891,6 +968,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "performed": not args.audit_only,
             "rows": 0,
             "train_eval_overlap_rows": 0,
+            "exempt_cross_dataset_train_eval_overlap_rows": 0,
             "cross_dataset_train_overlap_rows": 0,
             "status": "not_run" if args.audit_only else "complete",
         }
@@ -912,8 +990,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         spec.use_video_stem_identity,
                         spec.allow_text_only,
                     )
-                    if store.lookup("eval_identity", identities):
+                    eval_conflicts, exempt_eval_conflicts = partition_eval_conflicts(
+                        store.lookup("eval_identity", identities),
+                        spec.name,
+                        eval_overlap_exempt_groups,
+                    )
+                    if eval_conflicts:
                         verification["train_eval_overlap_rows"] += 1
+                    elif exempt_eval_conflicts:
+                        verification["exempt_cross_dataset_train_eval_overlap_rows"] += 1
                     owner_conflicts = {
                         identity: owners
                         for identity, owners in store.lookup("verify_owner", identities).items()
@@ -982,6 +1067,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "training_priority": priority,
             "policy": {
                 "eval_is_reserved_globally": True,
+                "eval_overlap_exempt_groups": [
+                    sorted(group) for group in eval_overlap_exempt_groups
+                ],
                 "require_media_identity": require_media_identity,
                 "deduplicate_cross_dataset_train": deduplicate_cross_dataset_train,
                 "cross_dataset_train_owner": (
@@ -993,7 +1081,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "cross_dataset_repeated_media_rows": (
                     "excluded regardless of source family"
                     if deduplicate_cross_dataset_train
-                    else "retained; only train-vs-eval media is excluded"
+                    else "retained; only non-exempt train-vs-eval media is excluded"
+                ),
+                "cross_dataset_eval_overlap": (
+                    "exempt families keep shared images in each dataset train split"
+                    if eval_overlap_exempt_groups
+                    else "any eval media blocks every training dataset"
                 ),
                 "media_file_mutability": (
                     "media files must remain unchanged for the duration of one run; "

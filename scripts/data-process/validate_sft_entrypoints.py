@@ -189,6 +189,16 @@ def validate_global_dedup(
         raise ValueError(
             "Global dedup report cross-dataset train policy does not match manifest"
         )
+    manifest_exempt_groups = sorted(
+        sorted(group) for group in (policy.get("eval_overlap_exempt_groups") or [])
+    )
+    report_exempt_groups = sorted(
+        sorted(group) for group in (report_policy.get("eval_overlap_exempt_groups") or [])
+    )
+    if report_exempt_groups != manifest_exempt_groups:
+        raise ValueError(
+            "Global dedup report eval_overlap_exempt_groups does not match manifest"
+        )
     if (
         deduplicate_cross_dataset_train
         and verification.get("cross_dataset_train_overlap_rows") != 0

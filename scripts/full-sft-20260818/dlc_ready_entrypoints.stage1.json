@@ -5,6 +5,9 @@
     "required": true,
     "require_media_identity": true,
     "deduplicate_cross_dataset_train": false,
+    "eval_overlap_exempt_groups": [
+      ["gqa", "visualgenome-qa", "visualgenome-regions"]
+    ],
     "training_priority": [
       "ai2d",
       "chartqa",

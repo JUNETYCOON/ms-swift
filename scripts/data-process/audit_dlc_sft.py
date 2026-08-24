@@ -708,6 +708,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cross_dataset_train_media_is_retained": not policy.get(
                 "deduplicate_cross_dataset_train", True
             ),
+            "eval_overlap_exempt_groups": policy.get("eval_overlap_exempt_groups") or [],
             "exact_duplicate_rows_must_be_zero": True,
             "local_absolute_media_paths_required": True,
             "grounding_spot_checks_are_drawn_on_source_pixels": True,

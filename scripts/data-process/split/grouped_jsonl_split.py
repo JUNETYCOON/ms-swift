@@ -11,7 +11,7 @@ import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, TextIO
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 GroupResolver = Callable[[dict[str, Any], Path], str]
@@ -104,6 +104,37 @@ def stable_is_eval(group: str, eval_ratio: float, seed: int) -> bool:
     return int.from_bytes(digest, "big") < threshold
 
 
+def normalize_image_stem(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return str(int(text))
+    return text.casefold()
+
+
+def image_stem_group(record: Mapping[str, Any], jsonl_path: Path) -> str:
+    """Group Visual Genome / GQA rows by image_id or filename stem."""
+    image_id = record.get("image_id")
+    if image_id is not None:
+        stem = normalize_image_stem(image_id)
+        if stem:
+            return stem
+    stems: list[str] = []
+    for value in record_values(record, "images", jsonl_path):
+        parsed = urlsplit(value)
+        path_text = unquote(parsed.path) if parsed.scheme else value
+        stem = normalize_image_stem(Path(path_text).stem)
+        if stem:
+            stems.append(stem)
+    unique = sorted(set(stems))
+    if not unique:
+        raise ValueError("record has no image_id or image filename stem")
+    if len(unique) == 1:
+        return unique[0]
+    return json.dumps(unique, ensure_ascii=False, separators=(",", ":"))
+
+
 class FileDigestCache:
     def __init__(self, algorithm: str = "sha256") -> None:
         hashlib.new(algorithm)
@@ -190,6 +221,7 @@ def split_jsonl(
     eval_ratio: float = 0.1,
     seed: int = 42,
     reserved_eval_paths: Sequence[Path] = (),
+    force_train_groups: Iterable[str] = (),
     reserve_only: bool = False,
     stratum_resolver: StratumResolver | None = None,
     progress_every: int = 50_000,
@@ -220,6 +252,14 @@ def split_jsonl(
             raise FileExistsError(f"output exists; pass --overwrite: {output}")
 
     forced_eval_groups, reserved_rows = _load_groups(reserved, group_resolver)
+    forced_train_groups = {str(group) for group in force_train_groups if str(group)}
+    overlap_forced = forced_eval_groups & forced_train_groups
+    if overlap_forced:
+        preview = ", ".join(sorted(overlap_forced)[:10])
+        raise ValueError(
+            f"{len(overlap_forced):,} groups are forced into both train and eval. "
+            f"First groups: {preview}"
+        )
     if reserve_only and not forced_eval_groups:
         raise ValueError("reserve_only requires at least one reserved eval group")
 
@@ -251,6 +291,9 @@ def split_jsonl(
                     if group in forced_eval_groups:
                         split = "eval"
                         stats["forced_eval_rows"] += 1
+                    elif group in forced_train_groups:
+                        split = "train"
+                        stats["forced_train_rows"] += 1
                     elif reserve_only:
                         split = "train"
                     else:
@@ -308,11 +351,17 @@ def split_jsonl(
                 "reserve_only": reserve_only,
                 "missing_groups": 0,
             },
+            "forced_train": {
+                "groups": len(forced_train_groups),
+                "present_groups": len(forced_train_groups & set(split_groups)),
+                "rows": stats["forced_train_rows"],
+            },
             "rows": {
                 "input": stats["input_rows"],
                 "train": stats["train_rows"],
                 "eval": stats["eval_rows"],
                 "forced_eval": stats["forced_eval_rows"],
+                "forced_train": stats["forced_train_rows"],
             },
             "groups": {
                 "total": len(split_groups),

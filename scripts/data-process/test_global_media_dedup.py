@@ -119,6 +119,93 @@ class GlobalMediaDedupTest(unittest.TestCase):
             )
             validate_global_dedup(manifest, manifest_path)
 
+    def test_exempt_family_keeps_shared_eval_image_in_each_train(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "shared.jpg"
+            vg_only = root / "vg-only.jpg"
+            gqa_eval = root / "gqa-eval.jpg"
+            shared.write_bytes(b"shared-gqa-vg")
+            vg_only.write_bytes(b"vg-only")
+            gqa_eval.write_bytes(b"gqa-eval")
+            write_jsonl(
+                root / "gqa-eval.jsonl",
+                [{"id": "gqa-eval", "images": [str(gqa_eval)]}],
+            )
+            write_jsonl(
+                root / "vg-eval.jsonl",
+                [{"id": "vg-eval", "images": [str(vg_only)]}],
+            )
+            write_jsonl(
+                root / "gqa-source.jsonl",
+                [
+                    {"id": "gqa-shared", "images": [str(shared)]},
+                    {"id": "gqa-contaminated", "images": [str(gqa_eval)]},
+                ],
+            )
+            write_jsonl(
+                root / "vg-source.jsonl",
+                [
+                    {"id": "vg-shared", "images": [str(shared)]},
+                    {"id": "vg-from-gqa-eval", "images": [str(gqa_eval)]},
+                    {"id": "vg-contaminated", "images": [str(vg_only)]},
+                ],
+            )
+            manifest = {
+                "version": 2,
+                "global_dedup": {
+                    "required": True,
+                    "deduplicate_cross_dataset_train": False,
+                    "eval_overlap_exempt_groups": [["gqa", "visualgenome-qa"]],
+                    "training_priority": ["gqa", "visualgenome-qa"],
+                    "report": str(root / "report.json"),
+                    "exclusions": str(root / "exclusions.jsonl"),
+                    "cache_db": str(root / "cache.sqlite"),
+                },
+                "datasets": {
+                    "gqa": {
+                        "enabled": True,
+                        "source_train": str(root / "gqa-source.jsonl"),
+                        "train": str(root / "gqa-clean.jsonl"),
+                        "eval": str(root / "gqa-eval.jsonl"),
+                    },
+                    "visualgenome-qa": {
+                        "enabled": True,
+                        "source_train": str(root / "vg-source.jsonl"),
+                        "train": str(root / "vg-clean.jsonl"),
+                        "eval": str(root / "vg-eval.jsonl"),
+                    },
+                },
+            }
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            report = run(parse_args(["--manifest", str(manifest_path), "--overwrite"]))
+
+            self.assertEqual(read_ids(root / "gqa-clean.jsonl"), ["gqa-shared"])
+            self.assertEqual(
+                read_ids(root / "vg-clean.jsonl"),
+                ["vg-shared", "vg-from-gqa-eval"],
+            )
+            self.assertEqual(report["verification"]["train_eval_overlap_rows"], 0)
+            self.assertEqual(
+                report["verification"]["exempt_cross_dataset_train_eval_overlap_rows"],
+                1,
+            )
+            self.assertEqual(
+                report["datasets"]["visualgenome-qa"]["counts"][
+                    "retained_exempt_eval_overlap_rows"
+                ],
+                1,
+            )
+            self.assertEqual(
+                report["datasets"]["visualgenome-qa"]["counts"][
+                    "excluded_eval_media_overlap_rows"
+                ],
+                1,
+            )
+            validate_global_dedup(manifest, manifest_path)
+
     def test_eval_reservation_coco_id_hash_and_episode_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

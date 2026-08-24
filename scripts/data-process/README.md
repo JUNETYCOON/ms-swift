@@ -56,3 +56,7 @@ adapter 插件，通过 `universal_dataset/cli.py convert-source` 做转换、
 `dlc_ready_entrypoints.stage1.json`、`curated_dataset_entrypoints.stage1.json`、
 `dlc_non_global_entrypoints.stage1.json` 是训练入口 manifest，保留在
 `scripts/` 根目录，不随数据处理脚本移动。
+
+## 清洗、去重与过滤规则
+
+Stage 1 训练数据的清洗、去重和过滤不在单一脚本里，而是按链路落在 `scripts/data-process/`：各源先由 `prepare_*.py` / `convert_*.py` / `curate_*.py` / `clean_*.py`（统一入口 `convert_datasets.py` + `processors.py`）拒绝缺媒体、非法文本、坐标无法归一到 `norm1000` 等记录并写入 `rejected.jsonl`；`sanitize_sft_jsonl.py` 再丢掉完全相同的 JSONL 行、非法 `messages`、`<image|video|audio>` 与媒体列表数量不一致、图片无法解码，以及 `bbox_type=real` 且越出解码宽高的框；`split/grouped_jsonl_split.py` 按图片/视频家族做 train/eval 切分，禁止同一媒体或 lineage 跨 split；最后 `global_media_dedup.py` 读取 `scripts/curated_dataset_entrypoints.stage1.json` 的 `global_dedup`：先冻结全部 eval 媒体身份（路径、URL、文件 SHA256、COCO 图号、`episode_id`/`video_id` 等 lineage），再按 `training_priority` 写各集 `*_global_train.jsonl`。同一数据集内部的 train/eval 媒体重叠一律排除（`eval_media_overlap`）；`eval_overlap_exempt_groups` 中的数据集家族（默认 GQA 与 Visual Genome）允许共享同一张图，各自保留在自己的 train 里。跨训练集媒体在 `deduplicate_cross_dataset_train=false` 时归各源自己保留、其余不再记 `higher_priority_train_overlap`，同一数据集内同图不同 QA 保留。Visual Genome 的 train/val 由 `split/resplit_visualgenome_gqa_shared.py` 重建：与 GQA 同图强制进 VG train，仅 VG 独有图像按 `val_ratio` 哈希进 val。入口合法性由 `validate_sft_entrypoints.py` 与 `audit_dlc_sft.py` 核对，排除明细在 `global_media_dedup_exclusions.jsonl`。
