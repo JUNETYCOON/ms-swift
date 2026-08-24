@@ -79,6 +79,47 @@ class ResplitVisualGenomeGqaSharedTest(unittest.TestCase):
                 read_ids(root / "visualgenome" / "visualgenome_qa_train.jsonl"),
             )
 
+    def test_uppercase_gqa_directory_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_jsonl(
+                root / "GQA" / "gqa_train_balanced_sft_msswift.jsonl",
+                [{"id": "gqa-train", "images": ["GQA/images/11.jpg"]}],
+            )
+            write_jsonl(
+                root / "GQA" / "gqa_val_balanced_sft_msswift.jsonl",
+                [{"id": "gqa-val", "images": ["GQA/images/11.jpg"]}],
+            )
+            write_jsonl(
+                root / "visualgenome" / "visualgenome_qa_train.jsonl",
+                [
+                    {"id": "vg-shared", "image_id": 11, "images": ["VG_100K/11.jpg"]},
+                    {"id": "vg-unique", "image_id": 33, "images": ["VG_100K/33.jpg"]},
+                ],
+            )
+            write_jsonl(
+                root / "visualgenome" / "visualgenome_qa_val.jsonl",
+                [{"id": "vg-old-val", "image_id": 11, "images": ["VG_100K/11.jpg"]}],
+            )
+            summary = run(
+                parse_args(
+                    [
+                        "--data-root",
+                        str(root),
+                        "--val-ratio",
+                        "0.99",
+                        "--seed",
+                        "42",
+                        "--overwrite",
+                    ]
+                )
+            )
+            self.assertTrue(any("GQA" in path for path in summary["gqa_inputs"]))
+            train_ids = set(read_ids(root / "visualgenome" / "visualgenome_qa_train.jsonl"))
+            eval_ids = set(read_ids(root / "visualgenome" / "visualgenome_qa_val.jsonl"))
+            self.assertEqual(train_ids, {"vg-shared", "vg-old-val"})
+            self.assertEqual(eval_ids, {"vg-unique"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,47 +29,49 @@ from grouped_jsonl_split import image_stem_group, split_jsonl
 
 
 DEFAULT_DATA_ROOT = Path("/mnt/pengtaijun/vlm_fm/dataset/dataset_ms-swift")
-GQA_INPUT_CANDIDATES = (
+GQA_DIR_NAMES = ("gqa", "GQA")
+VG_DIR_NAMES = ("visualgenome", "VisualGenome", "visual_genome")
+GQA_PAIR_NAMES = (
     (
-        "gqa/gqa_train_balanced_sft_msswift.jsonl",
-        "gqa/gqa_val_balanced_sft_msswift.jsonl",
+        "gqa_train_balanced_sft_msswift.jsonl",
+        "gqa_val_balanced_sft_msswift.jsonl",
     ),
     (
-        "gqa/gqa_train_balanced_sft_msswift_sanitized_source.jsonl",
-        "gqa/gqa_val_balanced_sft_msswift_ready_eval.jsonl",
+        "gqa_train_balanced_sft_msswift_sanitized_source.jsonl",
+        "gqa_val_balanced_sft_msswift_ready_eval.jsonl",
     ),
     (
-        "gqa/gqa_train_balanced_sft_msswift_dlc_train.jsonl",
-        "gqa/gqa_val_balanced_sft_msswift.jsonl",
+        "gqa_train_balanced_sft_msswift_dlc_train.jsonl",
+        "gqa_val_balanced_sft_msswift.jsonl",
     ),
 )
 VG_TASKS = (
     {
         "name": "visualgenome-qa",
         "inputs": (
-            "visualgenome/visualgenome_qa_train.jsonl",
-            "visualgenome/visualgenome_qa_val.jsonl",
+            "visualgenome_qa_train.jsonl",
+            "visualgenome_qa_val.jsonl",
         ),
-        "train": "visualgenome/visualgenome_qa_train.jsonl",
-        "eval": "visualgenome/visualgenome_qa_val.jsonl",
-        "report": "visualgenome/visualgenome_qa_gqa_shared_split_report.json",
+        "train": "visualgenome_qa_train.jsonl",
+        "eval": "visualgenome_qa_val.jsonl",
+        "report": "visualgenome_qa_gqa_shared_split_report.json",
         "sync_train": (
-            "visualgenome/visualgenome_qa_dlc_train.jsonl",
-            "visualgenome/visualgenome_qa_sanitized_source.jsonl",
+            "visualgenome_qa_dlc_train.jsonl",
+            "visualgenome_qa_sanitized_source.jsonl",
         ),
     },
     {
         "name": "visualgenome-regions",
         "inputs": (
-            "visualgenome/visualgenome_regions_train.jsonl",
-            "visualgenome/visualgenome_regions_val.jsonl",
+            "visualgenome_regions_train.jsonl",
+            "visualgenome_regions_val.jsonl",
         ),
-        "train": "visualgenome/visualgenome_regions_train.jsonl",
-        "eval": "visualgenome/visualgenome_regions_val.jsonl",
-        "report": "visualgenome/visualgenome_regions_gqa_shared_split_report.json",
+        "train": "visualgenome_regions_train.jsonl",
+        "eval": "visualgenome_regions_val.jsonl",
+        "report": "visualgenome_regions_gqa_shared_split_report.json",
         "sync_train": (
-            "visualgenome/visualgenome_regions_dlc_train.jsonl",
-            "visualgenome/visualgenome_regions_sanitized_source.jsonl",
+            "visualgenome_regions_dlc_train.jsonl",
+            "visualgenome_regions_sanitized_source.jsonl",
         ),
     },
 )
@@ -96,29 +98,59 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def existing_files(root: Path, relative_paths: Iterable[str]) -> list[Path]:
+def existing_dirs(root: Path, names: Sequence[str]) -> list[Path]:
+    found: list[Path] = []
+    for name in names:
+        path = (root / name).expanduser()
+        if path.is_dir():
+            found.append(path.resolve())
+    return found
+
+
+def resolve_jsonl(directory: Path, filename: str) -> Path | None:
+    direct = directory / filename
+    if direct.is_file():
+        return direct.resolve()
+    wanted = filename.casefold()
+    for path in directory.glob("*.jsonl"):
+        if path.name.casefold() == wanted:
+            return path.resolve()
+    return None
+
+
+def existing_files(directories: Sequence[Path], filenames: Iterable[str]) -> list[Path]:
     files: list[Path] = []
-    for relative in relative_paths:
-        path = (root / relative).expanduser()
-        if path.is_file():
-            files.append(path.resolve())
+    for filename in filenames:
+        match: Path | None = None
+        for directory in directories:
+            match = resolve_jsonl(directory, filename)
+            if match is not None:
+                break
+        if match is None:
+            return []
+        files.append(match)
     return files
 
 
 def resolve_gqa_inputs(root: Path) -> list[Path]:
-    for relative_paths in GQA_INPUT_CANDIDATES:
-        files = existing_files(root, relative_paths)
-        if len(files) == len(relative_paths):
+    directories = existing_dirs(root, GQA_DIR_NAMES)
+    for filenames in GQA_PAIR_NAMES:
+        files = existing_files(directories, filenames)
+        if len(files) == len(filenames):
             return files
     discovered = sorted(
-        path.resolve()
-        for path in (root / "gqa").glob("*.jsonl")
-        if path.is_file()
+        {
+            path.resolve()
+            for directory in directories
+            for path in directory.glob("*.jsonl")
+            if path.is_file()
+        }
     )
     if discovered:
         return discovered
+    searched = ", ".join(str(root / name) for name in GQA_DIR_NAMES)
     raise FileNotFoundError(
-        f"Could not find GQA JSONL files below {root / 'gqa'}. "
+        f"Could not find GQA JSONL files below {searched}. "
         "Pass a data root that contains the converted GQA train and val files."
     )
 
@@ -155,7 +187,7 @@ def replace_with_copy(source: Path, destination: Path) -> None:
 
 def resplit_task(
     *,
-    root: Path,
+    vg_dir: Path,
     task: dict[str, Any],
     gqa_stems: set[str],
     val_ratio: float,
@@ -164,14 +196,14 @@ def resplit_task(
     overwrite: bool,
     sync_source_train: bool,
 ) -> dict[str, Any]:
-    inputs = existing_files(root, task["inputs"])
+    inputs = existing_files([vg_dir], task["inputs"])
     if not inputs:
         raise FileNotFoundError(
-            f"{task['name']}: missing input JSONL files under {root}: {list(task['inputs'])}"
+            f"{task['name']}: missing input JSONL files under {vg_dir}: {list(task['inputs'])}"
         )
-    train_output = (root / task["train"]).resolve()
-    eval_output = (root / task["eval"]).resolve()
-    report_output = (root / task["report"]).resolve()
+    train_output = (vg_dir / task["train"]).resolve()
+    eval_output = (vg_dir / task["eval"]).resolve()
+    report_output = (vg_dir / task["report"]).resolve()
     destinations = (train_output, eval_output, report_output)
     if not overwrite:
         existing = [str(path) for path in destinations if path.exists()]
@@ -179,7 +211,7 @@ def resplit_task(
             raise FileExistsError(
                 "output exists; pass --overwrite: " + ", ".join(existing)
             )
-    staging_dir = root / "visualgenome" / ".gqa-shared-resplit"
+    staging_dir = vg_dir / ".gqa-shared-resplit"
     staging_dir.mkdir(parents=True, exist_ok=True)
     staged_train = staging_dir / f"{task['name']}.train.jsonl"
     staged_eval = staging_dir / f"{task['name']}.eval.jsonl"
@@ -213,8 +245,8 @@ def resplit_task(
     synced: list[str] = []
     if sync_source_train:
         for relative in task.get("sync_train") or ():
-            destination = (root / relative).resolve()
-            if not destination.is_file() or destination == train_output:
+            destination = resolve_jsonl(vg_dir, relative)
+            if destination is None or destination == train_output:
                 continue
             replace_with_copy(train_output, destination)
             synced.append(str(destination))
@@ -242,17 +274,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     gqa_stems = collect_image_stems(gqa_inputs, args.progress_every)
     if not gqa_stems:
         raise ValueError("GQA inputs did not yield any image stems")
+    vg_dirs = existing_dirs(root, VG_DIR_NAMES)
+    vg_dir = vg_dirs[0] if vg_dirs else None
     reports = []
     skipped: list[str] = []
     for task in VG_TASKS:
-        inputs = existing_files(root, task["inputs"])
+        if vg_dir is None:
+            skipped.append(task["name"])
+            print(f"[skip] {task['name']} missing Visual Genome directory", flush=True)
+            continue
+        inputs = existing_files([vg_dir], task["inputs"])
         if not inputs:
             skipped.append(task["name"])
-            print(f"[skip] {task['name']} missing {list(task['inputs'])}", flush=True)
+            print(f"[skip] {task['name']} missing {list(task['inputs'])} under {vg_dir}", flush=True)
             continue
         reports.append(
             resplit_task(
-                root=root,
+                vg_dir=vg_dir,
                 task=task,
                 gqa_stems=gqa_stems,
                 val_ratio=args.val_ratio,
@@ -263,9 +301,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         )
     if not reports:
+        searched = ", ".join(str(root / name) for name in VG_DIR_NAMES)
         raise FileNotFoundError(
-            "No Visual Genome train/val JSONL files were found under "
-            f"{root / 'visualgenome'}"
+            "No Visual Genome train/val JSONL files were found under " + searched
         )
     summary = {
         "data_root": str(root),
@@ -276,7 +314,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "skipped_datasets": skipped,
         "datasets": reports,
     }
-    summary_path = root / "visualgenome" / "visualgenome_gqa_shared_split_summary.json"
+    summary_path = (vg_dir or root / "visualgenome") / "visualgenome_gqa_shared_split_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"[write] {summary_path}", flush=True)
     return summary
